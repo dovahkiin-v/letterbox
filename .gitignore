@@ -1,0 +1,107 @@
+# ──────────────────────────────────────────────────────────────
+# Local collaboration context — NOT for the public repo
+# ──────────────────────────────────────────────────────────────
+CLAUDE.md
+PLANNING_FRAMEWORK.md
+
+# Sample personas are public: Claude Code reads CLAUDE.md (not AGENTS.md), so
+# the two-claudes-debating personas must ship a CLAUDE.md (see ADR-049). These
+# negations exempt them from the repo-wide CLAUDE.md ignore above.
+!examples/two-claudes-debating/claude-a/CLAUDE.md
+!examples/two-claudes-debating/claude-b/CLAUDE.md
+
+# ──────────────────────────────────────────────────────────────
+# Secrets / environment
+# ──────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# ──────────────────────────────────────────────────────────────
+# Python
+# ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+pip-wheel-metadata/
+
+# Virtualenvs
+venv/
+.venv/
+env/
+ENV/
+
+# ──────────────────────────────────────────────────────────────
+# Test / coverage / lint caches
+# ──────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+
+# ──────────────────────────────────────────────────────────────
+# Type checking / docs build artifacts
+# ──────────────────────────────────────────────────────────────
+docs/_build/
+site/
+
+# ──────────────────────────────────────────────────────────────
+# Letterbox runtime state (created during local testing)
+# ──────────────────────────────────────────────────────────────
+.letterbox/
+letterbox.log
+*.letterbox.tmp
+
+# ──────────────────────────────────────────────────────────────
+# IDE / editor
+# ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.\#*
+\#*\#
+.project
+.pydevproject
+
+# ──────────────────────────────────────────────────────────────
+# OS
+# ──────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ──────────────────────────────────────────────────────────────
+# Misc
+# ──────────────────────────────────────────────────────────────
+*.bak
+*.tmp
+*.log
+scratch/
+notes-local/

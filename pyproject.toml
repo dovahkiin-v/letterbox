@@ -1,0 +1,100 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "letterbox"
+version = "1.0.0"
+description = "File-based comms protocol for AI-to-AI dialogue between terminal agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Vinga Luksaite", email = "vingaluksaite@gmail.com" }]
+keywords = [
+    "mcp",
+    "ai-agents",
+    "agent-communication",
+    "ipc",
+    "cli",
+    "pty",
+    "claude-code",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Topic :: Communications",
+    "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "mcp>=1.27,<1.28",
+    "watchdog>=4.0,<5.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "pytest-xdist>=3.5",
+    "hypothesis>=6.100",
+]
+
+[project.urls]
+Homepage = "https://github.com/dovahkiin-v/letterbox"
+Repository = "https://github.com/dovahkiin-v/letterbox"
+Documentation = "https://github.com/dovahkiin-v/letterbox#readme"
+
+[project.scripts]
+letterbox = "letterbox.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["letterbox*"]
+exclude = ["tests*", "examples*"]
+
+# Phase 1c — ship bundled sample TOML(s) in the wheel so importlib.resources
+# can read them after install. The empty letterbox/data/__init__.py marker
+# is what lets packages.find pick up the data subpackage in the first place.
+[tool.setuptools.package-data]
+letterbox = ["data/*.toml"]
+
+# ──────────────────────────────────────────────────────────────
+# Pytest configuration (Phase 1b)
+# ──────────────────────────────────────────────────────────────
+# Phase 13b raised the coverage gate to the Vision §9.1 finals: ≥50% overall,
+# enforced here via --cov-fail-under=50. The stricter per-module floors
+# (≥80% protocol/watcher, ≥60% adapters, ≥50% CLI/config) are enforced in CI
+# by `coverage report --include=… --fail-under=N` steps on the test matrix.
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# Default suite runs everything EXCEPT ``@pytest.mark.budget`` tests so the
+# fast/cheap tests run under coverage; budget tests run in a second CI step
+# (``pytest -m budget --no-cov``) — coverage tracing adds enough per-call
+# overhead to push the ``check_messages`` P95 past its 100 ms budget on
+# real hardware, gating on tracing cost instead of letterbox cost
+# (Phase 2d fresh-eyes deviation from p2d §5 "no marker, no separate
+# config" — diagnosis in tests/test_performance_budgets_protocol.py).
+#
+# ``--dist loadgroup`` (Phase 4b deviation) honours ``@pytest.mark.xdist_group``
+# markers so a test file that mustn't fan out across workers can be pinned to
+# one. ``tests/test_watcher.py`` uses this to keep all inotify-instance
+# allocations on a single worker — without it, parallel watcher tests exhaust
+# ``fs.inotify.max_user_instances`` (default 128) and fail with
+# ``OSError(EMFILE)``. Ungrouped tests still distribute load-balanced as
+# before.
+addopts = "-n auto --dist loadgroup -m 'not budget' --cov=letterbox --cov-report=term-missing --cov-fail-under=50"
+markers = [
+    "budget: Phase 2d/4e/10c performance-budget gate (Vision §9.4). Run with `pytest -m budget --no-cov` to measure uninstrumented latency.",
+]
+asyncio_mode = "strict"
+filterwarnings = ["error"]

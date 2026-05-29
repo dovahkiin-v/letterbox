@@ -1,0 +1,15 @@
+# Letterbox sample — two Claudes debating whether a hot dog is a sandwich.
+# Registers the "debate-01" channel both agents talk on.
+
+[letterbox]
+state_dir = "~/.letterbox"   # GLOBAL — both terminals must share this dir
+
+[harness.claude]
+command = "claude"
+default_args = ["--dangerously-skip-permissions"]
+notification_template = "📬 Peer message on channel {channel}. Call check_messages to read."
+
+[[channels]]
+name = "debate-01"
+description = "Two Claudes debating whether a hot dog is a sandwich"
+# NOTE: identity is per-launch (--as or LETTERBOX_SENDER), never per-channel-config.

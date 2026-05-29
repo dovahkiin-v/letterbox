@@ -1,0 +1,108 @@
+name: test
+
+# Phase 13b finalized this workflow: the test job runs on the full 3.10-3.13
+# matrix and enforces the Vision §9.1 coverage finals (≥50% overall via the
+# pyproject gate, plus per-module floors via `coverage report` steps). The
+# `checks` job runs the lints + uninstrumented budget pass once; the `build`
+# job proves the wheel + sdist build.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: pytest + coverage (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package + dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run pytest (coverage gate ≥50% via pyproject addopts)
+        run: pytest -v
+
+      # Per-module coverage floors (Vision §9.1). coverage.py's --fail-under is
+      # global, so each module group gets its own filtered report against the
+      # .coverage data file pytest-cov just wrote. Any module under its floor
+      # exits 2 → step fails → job fails. Runs on the matrix because config.py's
+      # tomllib/tomli import branch is version-sensitive (G3).
+      - name: Per-module coverage gates (Vision §9.1)
+        run: |
+          coverage report --include="letterbox/protocol.py" --fail-under=80
+          coverage report --include="letterbox/watcher.py" --fail-under=80
+          coverage report --include="letterbox/adapters/*" --fail-under=60
+          coverage report --include="letterbox/cli.py,letterbox/config.py" --fail-under=50
+
+  checks:
+    name: lints + performance budgets (Python 3.13)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install package + dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # `-o "addopts="` is load-bearing: it strips the inherited --cov
+      # instrumentation (coverage tracing skews the P95 measurement) AND the
+      # raised --cov-fail-under=50 (a --no-cov run reports ~0%). Budgets are
+      # user-facing promises (Vision §9.4/§13.7) — run them uninstrumented.
+      - name: Run performance budget tests (no coverage — Vision §13.7)
+        run: pytest -v -m budget --no-cov -o "addopts="
+
+      - name: Lint ensure_ascii=False discipline
+        run: ./scripts/lint_ensure_ascii.sh
+
+      - name: Lint no shell=True discipline
+        run: ./scripts/lint_no_shell_true.sh
+
+  build:
+    name: build wheel + sdist (Python 3.13)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # A fresh runner has no build frontend; install it before building.
+      # build_meta builds from the working tree in an isolated env that
+      # installs [build-system].requires — no editable install needed.
+      - name: Install build frontend
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build wheel + sdist
+        run: python -m build
+
+      - name: Assert wheel + sdist were produced
+        run: |
+          ls dist/letterbox-1.0.0-py3-none-any.whl
+          ls dist/letterbox-1.0.0.tar.gz
