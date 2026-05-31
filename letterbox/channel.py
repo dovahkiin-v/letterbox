@@ -816,9 +816,10 @@ def write_read_state(
             writes verbatim.
         fsync: If ``True``, fsync the data file AND the parent
             directory after the rename so a crash cannot lose the state
-            (K3). Default ``False`` matches Vision §9.4 ("no fsync by
-            default; ``--strict-fsync`` flag available for paranoid
-            users").
+            (K3). Default ``False`` matches Vision §9.4 (no fsync by
+            default; POSIX rename semantics carry durability for the
+            common case). Exposed only as this keyword argument — there
+            is no CLI flag.
 
     Returns:
         The final :class:`Path` to the renamed read-state file.

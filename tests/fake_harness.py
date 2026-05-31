@@ -74,6 +74,17 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional MCP config file; spawns the configured child via subprocess.",
     )
+    parser.add_argument(
+        "--echo-stdout",
+        action="store_true",
+        default=False,
+        help=(
+            "Also echo each stdin chunk to this process's stdout (in addition to "
+            "the --echo-to file). Default off. Used by the interactive-bridge "
+            "tests to exercise the master_fd -> user_stdout relay direction; "
+            "harmless and unused by every other caller."
+        ),
+    )
     args = parser.parse_args(argv)
 
     mcp_child: subprocess.Popen[bytes] | None = None
@@ -105,12 +116,18 @@ def main(argv: list[str] | None = None) -> int:
         # waiting for a full buffer — important when stdin is a PTY and the
         # other side sends short bursts (one notification at a time).
         stdin_buf = sys.stdin.buffer
+        stdout_buf = sys.stdout.buffer
         while not terminated:
             chunk = stdin_buf.read1(4096)
             if not chunk:
                 break  # EOF
             echo_fh.write(chunk)
             echo_fh.flush()
+            if args.echo_stdout:
+                # Re-emit to stdout (the PTY slave) so the launcher's bridge can
+                # relay master_fd -> user_stdout. Additive, default-off.
+                stdout_buf.write(chunk)
+                stdout_buf.flush()
 
     # Reap the MCP child cleanly. Real harnesses own their MCP child's
     # lifecycle; we mirror that contract here. communicate() is used over

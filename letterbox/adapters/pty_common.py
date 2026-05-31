@@ -1,26 +1,39 @@
 """Shared PTY spawn/inject helpers (forkpty, master/slave fd, teardown).
 
 Tier: 2
-May import from: stdlib only (``pty``, ``os``, ``subprocess``, ``signal``).
+May import from: stdlib only (``pty``, ``os``, ``subprocess``, ``signal``, ``fcntl``,
+    ``struct``, ``termios``, ``tty``, ``contextlib``).
 Must NOT import from: any other ``letterbox.*`` module — pty_common is a pure-stdlib
     leaf within the adapters package.
 
-Filled in: Phase 5a per PHASE_INDEX.
+Filled in: Phase 5a per PHASE_INDEX; terminal primitives (``get_winsize`` /
+    ``set_winsize`` / ``raw_mode``) added in remediation r1 (interactive bridge).
 """
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import signal
+import struct
 import subprocess
-from contextlib import suppress
+import termios
+import tty
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 __all__ = [
     "PTYHandle",
     "close_pty_handle",
+    "get_winsize",
     "inject_to_pty",
+    "raw_mode",
+    "set_winsize",
     "spawn_pty",
 ]
 
@@ -221,3 +234,84 @@ def close_pty_handle(
         os.close(handle.master_fd)
     with suppress(OSError):
         os.close(handle.slave_fd)
+
+
+# ── Terminal primitives (interactive bridge — remediation r1) ─────────
+# Small, pure, unit-testable helpers used by the launcher's terminal bridge to
+# size the harness PTY and to put the controlling tty in raw mode. They live here
+# (the PTY home) rather than in ``base.py`` (the per-adapter ABC) because the relay
+# is harness-agnostic. pty_common stays a stdlib-only leaf.
+
+
+def get_winsize(fd: int) -> tuple[int, int]:
+    """Return the ``(rows, cols)`` window size of the terminal at ``fd``.
+
+    Reads the size via the ``TIOCGWINSZ`` ioctl. Used by the bridge to learn the
+    controlling terminal's dimensions so it can mirror them onto the harness PTY.
+
+    Args:
+        fd: An open file descriptor referring to a tty.
+
+    Returns:
+        A ``(rows, cols)`` tuple. The ioctl also reports pixel dimensions; they
+        are read but discarded (terminals report them as zero in practice).
+
+    Raises:
+        OSError: If the ioctl fails (typically because ``fd`` is not a tty).
+    """
+    packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
+    rows, cols, _xpixels, _ypixels = struct.unpack("HHHH", packed)
+    return rows, cols
+
+
+def set_winsize(master_fd: int, rows: int, cols: int) -> None:
+    """Set the window size of the PTY behind ``master_fd`` to ``rows`` x ``cols``.
+
+    Writes the size via the ``TIOCSWINSZ`` ioctl on the master fd; the kernel
+    delivers ``SIGWINCH`` to the foreground process group of the slave so the
+    spawned harness re-renders its TUI at the new dimensions.
+
+    Args:
+        master_fd: The PTY master file descriptor whose size to set.
+        rows: Number of character rows.
+        cols: Number of character columns.
+
+    Returns:
+        None.
+
+    Raises:
+        OSError: If the ``TIOCSWINSZ`` ioctl fails.
+    """
+    fcntl.ioctl(
+        master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0)
+    )
+
+
+@contextmanager
+def raw_mode(fd: int) -> "Iterator[None]":
+    """Put ``fd`` into raw mode for the duration of the context, then restore.
+
+    Saves the terminal attributes with ``termios.tcgetattr`` on entry, switches
+    the fd to raw mode with ``tty.setraw`` (so keystrokes, control characters,
+    and escape sequences pass through byte-faithfully — ``ISIG``/``ICANON``/
+    ``ECHO`` are disabled), and **unconditionally** restores the saved attributes
+    with ``termios.tcsetattr(fd, TCSADRAIN, saved)`` in a ``finally``. An
+    exception raised inside the ``with`` block still cooks the terminal back.
+    ``TCSADRAIN`` drains queued output before applying the change so in-flight
+    bytes are not clipped.
+
+    Args:
+        fd: An open file descriptor referring to a tty.
+
+    Yields:
+        None. The fd is in raw mode for the body of the ``with`` block.
+
+    Raises:
+        termios.error: If ``fd`` is not a tty (propagated from ``tcgetattr``).
+    """
+    saved = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)

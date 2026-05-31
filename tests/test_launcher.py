@@ -34,6 +34,7 @@ import re
 import signal
 import subprocess
 import sys
+import termios
 import time
 import tty
 from contextlib import suppress
@@ -46,6 +47,7 @@ import letterbox.adapters.base as base
 from letterbox import launcher
 from letterbox.adapters.base import Adapter, register_adapter
 from letterbox.adapters.mcp_config import cleanup_mcp_config
+from letterbox.adapters.pty_common import get_winsize, set_winsize
 from letterbox.channel import Channel
 from letterbox.launcher import (
     LauncherSession,
@@ -349,13 +351,32 @@ class TestSetupLauncherValidation:
             os.chmod(tmp_letterbox_home, 0o700)
 
     @pytest.mark.asyncio
-    async def test_missing_state_dir_vector(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    async def test_missing_state_dir_autocreated(
+        self,
+        fake_adapter: type[Adapter],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # Framework P5 (self-healing) / ADR-051: a missing state dir is created
+        # at 0700 on launch, never refused with a traceback. Point at a missing
+        # home AND give a non-existent harness command, so setup proceeds past
+        # the state-dir step (proving auto-create) and then stops deterministically
+        # at the adapter-availability check — never reaching a real spawn,
+        # regardless of which harness binaries exist on this machine.
         missing = tmp_path / "nonexistent-home"
         monkeypatch.setenv("LETTERBOX_HOME", str(missing))
-        with pytest.raises(FileNotFoundError, match="letterbox init"):
-            await setup_launcher("claude", "ch", cwd=tmp_path)
+        _write_harness_config(
+            tmp_path / "letterbox.toml",
+            monkeypatch,
+            command="definitely-not-a-real-binary-xyzzy",
+            default_args=[],
+            template="📬 {channel}",
+        )
+        with pytest.raises(FileNotFoundError, match="not on PATH"):
+            await setup_launcher("fakeharness", "ch", cwd=tmp_path)
+        # The state dir was self-healed at 0700 before the PATH check fired.
+        assert missing.is_dir()
+        assert (missing.stat().st_mode & 0o777) == 0o700
 
     @pytest.mark.asyncio
     async def test_unknown_harness_keyerror(
@@ -1416,3 +1437,506 @@ class TestAwaitProcessExit:
             assert session.handle.process.poll() is not None
         finally:
             await _teardown_session(session)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Remediation r1 — the interactive terminal bridge (THE deliverable):
+# a real pty-pair harness that drives run_launcher with a fake user terminal
+# and proves the relay, raw-mode lifecycle, injected-📬 visibility, SIGWINCH
+# propagation, the non-tty no-op guard, and clean teardown. Automates the T6
+# class so it can never silently regress.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _spy_bridge(monkeypatch: pytest.MonkeyPatch) -> list[launcher._TerminalBridge]:
+    """Capture every ``_TerminalBridge`` ``run_launcher`` constructs internally.
+
+    The bridge is module-private and never exposed on the session, but the resize
+    test needs to drive its ``_on_resize`` handler and the teardown test needs to
+    assert the relay thread joined. Subclass-and-record (mirrors
+    ``_spy_setup_launcher``); the empty list also proves the non-tty path builds
+    NO bridge at all.
+    """
+    captured: list[launcher._TerminalBridge] = []
+    real_cls = launcher._TerminalBridge
+
+    class _SpyBridge(real_cls):  # type: ignore[valid-type, misc]
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+            captured.append(self)
+
+    monkeypatch.setattr(launcher, "_TerminalBridge", _SpyBridge)
+    return captured
+
+
+def _make_drainer(fd: int, needle: bytes) -> "Callable[[], bool]":
+    """Build a ``wait_for`` predicate that drains ``fd`` and looks for ``needle``.
+
+    ``fd`` must be non-blocking. Each call reads whatever bytes are currently
+    available (accumulating across polls) and returns True once ``needle`` has
+    appeared in the accumulated buffer.
+    """
+    buf = bytearray()
+
+    def _check() -> bool:
+        with suppress(BlockingIOError, OSError):
+            while True:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+        return needle in buf
+
+    return _check
+
+
+async def _launch_bridged(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_harness: FakeHarness,
+    channel: str = "bridge-ch",
+    echo_stdout: bool = True,
+) -> tuple[int, int, list[LauncherSession], list[launcher._TerminalBridge], "asyncio.Task[int]"]:
+    """Spawn a bridged ``run_launcher`` against a fake user terminal (os.openpty).
+
+    Returns ``(user_master, user_slave, captured_sessions, captured_bridges,
+    task)``. ``user_master`` is non-blocking and is the "human" end the test
+    drives; ``user_slave`` is passed to ``run_launcher`` as both the user stdin and
+    stdout fd (a tty → the bridge engages). The caller owns cancelling ``task`` and
+    closing both fds in a ``finally``.
+    """
+    user_master, user_slave = os.openpty()
+    os.set_blocking(user_master, False)
+    default_args = [
+        str(fake_harness.script_path),
+        "--echo-to",
+        str(fake_harness.echo_file),
+    ]
+    if echo_stdout:
+        default_args.append("--echo-stdout")
+    _write_harness_config(
+        tmp_path / "letterbox.toml",
+        monkeypatch,
+        command=sys.executable,
+        default_args=default_args,
+        template="📬 {channel}",
+    )
+    _patch_sleeper_mcp_config(monkeypatch, tmp_path)
+    captured = _spy_setup_launcher(monkeypatch)
+    bridges = _spy_bridge(monkeypatch)
+    task = asyncio.create_task(
+        run_launcher(
+            "fakeharness",
+            channel,
+            cwd=tmp_path,
+            user_stdin_fd=user_slave,
+            user_stdout_fd=user_slave,
+            teardown_timeout=_FAST_TEARDOWN,
+        )
+    )
+    # Wait until the relay thread is live — past bridge.start(), so raw mode is set
+    # and the initial window size has been propagated.
+    await wait_for(
+        lambda: bool(bridges)
+        and bridges[0]._thread is not None
+        and bridges[0]._thread.is_alive(),
+        timeout=10.0,
+    )
+    return user_master, user_slave, captured, bridges, task
+
+
+async def _cancel_and_settle(task: "asyncio.Task[int]") -> None:
+    """Cancel ``task`` and await it, swallowing the CancelledError."""
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+class TestTerminalBridge:
+    @pytest.mark.asyncio
+    async def test_bytes_flow_both_directions(
+        self,
+        fake_harness: FakeHarness,
+        fake_adapter: type[Adapter],
+        tmp_letterbox_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user_master, user_slave, captured, _bridges, task = await _launch_bridged(
+            tmp_path=tmp_path, monkeypatch=monkeypatch, fake_harness=fake_harness
+        )
+        try:
+            os.write(user_master, b"hello-bridge\n")
+            # user_stdin → master_fd → child: the bytes land in the echo file.
+            await wait_for(
+                lambda: b"hello-bridge" in fake_harness.read_echo(), timeout=10.0
+            )
+            # master_fd → user_stdout: the relay carries the child's output back to
+            # the user terminal (via --echo-stdout and/or the slave's line echo).
+            await wait_for(_make_drainer(user_master, b"hello-bridge"), timeout=10.0)
+        finally:
+            await _cancel_and_settle(task)
+            os.close(user_master)
+            os.close(user_slave)
+        _session_torn_down(captured[0])
+
+    @pytest.mark.asyncio
+    async def test_injected_notification_visible_on_user_side(
+        self,
+        fake_harness: FakeHarness,
+        fake_adapter: type[Adapter],
+        tmp_letterbox_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user_master, user_slave, captured, _bridges, task = await _launch_bridged(
+            tmp_path=tmp_path, monkeypatch=monkeypatch, fake_harness=fake_harness
+        )
+        try:
+            # A peer message → watcher event → injection into master_fd → echoed
+            # back through the PTY → relayed to the user's screen (Vision §2.2).
+            _write_peer_message(captured[0].channel)
+            await wait_for(
+                _make_drainer(user_master, "📬 bridge-ch".encode("utf-8")),
+                timeout=10.0,
+            )
+        finally:
+            await _cancel_and_settle(task)
+            os.close(user_master)
+            os.close(user_slave)
+        _session_torn_down(captured[0])
+
+    @pytest.mark.asyncio
+    async def test_raw_mode_set_during_session_and_restored_after_teardown(
+        self,
+        fake_harness: FakeHarness,
+        fake_adapter: type[Adapter],
+        tmp_letterbox_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user_master, user_slave = os.openpty()
+        os.set_blocking(user_master, False)
+        saved = termios.tcgetattr(user_slave)
+        # The user terminal starts cooked (ECHO + ICANON).
+        assert saved[3] & termios.ECHO
+        assert saved[3] & termios.ICANON
+
+        default_args = [
+            str(fake_harness.script_path),
+            "--echo-to",
+            str(fake_harness.echo_file),
+        ]
+        _write_harness_config(
+            tmp_path / "letterbox.toml",
+            monkeypatch,
+            command=sys.executable,
+            default_args=default_args,
+            template="📬 {channel}",
+        )
+        _patch_sleeper_mcp_config(monkeypatch, tmp_path)
+        captured = _spy_setup_launcher(monkeypatch)
+        bridges = _spy_bridge(monkeypatch)
+        task = asyncio.create_task(
+            run_launcher(
+                "fakeharness",
+                "raw-ch",
+                cwd=tmp_path,
+                user_stdin_fd=user_slave,
+                user_stdout_fd=user_slave,
+                teardown_timeout=_FAST_TEARDOWN,
+            )
+        )
+        try:
+            # During the session the controlling tty is raw (ICANON + ECHO cleared).
+            await wait_for(
+                lambda: not (termios.tcgetattr(user_slave)[3] & termios.ICANON),
+                timeout=10.0,
+            )
+            assert not (termios.tcgetattr(user_slave)[3] & termios.ECHO)
+        finally:
+            await _cancel_and_settle(task)
+        # Every exit path restores the exact saved attributes.
+        assert termios.tcgetattr(user_slave) == saved
+        os.close(user_master)
+        os.close(user_slave)
+        _session_torn_down(captured[0])
+
+    @pytest.mark.asyncio
+    async def test_initial_size_and_sigwinch_resize_reach_child(
+        self,
+        fake_harness: FakeHarness,
+        fake_adapter: type[Adapter],
+        tmp_letterbox_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user_master, user_slave = os.openpty()
+        os.set_blocking(user_master, False)
+        # Size the fake user terminal BEFORE launch; the bridge mirrors it onto the
+        # harness PTY at start.
+        set_winsize(user_master, 40, 100)
+        default_args = [
+            str(fake_harness.script_path),
+            "--echo-to",
+            str(fake_harness.echo_file),
+        ]
+        _write_harness_config(
+            tmp_path / "letterbox.toml",
+            monkeypatch,
+            command=sys.executable,
+            default_args=default_args,
+            template="📬 {channel}",
+        )
+        _patch_sleeper_mcp_config(monkeypatch, tmp_path)
+        captured = _spy_setup_launcher(monkeypatch)
+        bridges = _spy_bridge(monkeypatch)
+        task = asyncio.create_task(
+            run_launcher(
+                "fakeharness",
+                "winsize-ch",
+                cwd=tmp_path,
+                user_stdin_fd=user_slave,
+                user_stdout_fd=user_slave,
+                teardown_timeout=_FAST_TEARDOWN,
+            )
+        )
+        try:
+            await wait_for(
+                lambda: bool(bridges)
+                and bridges[0]._thread is not None
+                and bridges[0]._thread.is_alive(),
+                timeout=10.0,
+            )
+            # Initial size reached the child PTY at bridge start.
+            assert get_winsize(captured[0].handle.master_fd) == (40, 100)
+            # Resize the user terminal, then drive the SIGWINCH handler directly
+            # (real-signal delivery is flaky under xdist — assert propagation, not
+            # the kernel signal path; Plan §3.6 #4).
+            set_winsize(user_master, 50, 120)
+            bridges[0]._on_resize()
+            await wait_for(
+                lambda: get_winsize(captured[0].handle.master_fd) == (50, 120),
+                timeout=10.0,
+            )
+        finally:
+            await _cancel_and_settle(task)
+            os.close(user_master)
+            os.close(user_slave)
+        _session_torn_down(captured[0])
+
+    @pytest.mark.asyncio
+    async def test_non_tty_fds_skip_the_bridge(
+        self,
+        fake_adapter: type[Adapter],
+        tmp_letterbox_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Non-tty fds (a plain pipe) → the bridge must NOT engage, and run_launcher
+        # behaves exactly as the lifecycle-only original (the 975-test assumption).
+        read_fd, write_fd = os.pipe()
+        _write_harness_config(
+            tmp_path / "letterbox.toml",
+            monkeypatch,
+            command=sys.executable,
+            default_args=["-c", "import time; time.sleep(0.5)"],
+            template="📬 {channel}",
+        )
+        captured = _spy_setup_launcher(monkeypatch)
+        bridges = _spy_bridge(monkeypatch)
+        try:
+            rc = await asyncio.wait_for(
+                run_launcher(
+                    "fakeharness",
+                    "nontty-ch",
+                    cwd=tmp_path,
+                    user_stdin_fd=read_fd,
+                    user_stdout_fd=write_fd,
+                    teardown_timeout=_FAST_TEARDOWN,
+                ),
+                timeout=10.0,
+            )
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+        assert rc == 0
+        assert bridges == []  # no bridge constructed for non-tty fds
+        _session_torn_down(captured[0])
+
+    @pytest.mark.asyncio
+    async def test_teardown_restores_tty_and_joins_relay_thread(
+        self,
+        fake_harness: FakeHarness,
+        fake_adapter: type[Adapter],
+        tmp_letterbox_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user_master, user_slave, captured, bridges, task = await _launch_bridged(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            fake_harness=fake_harness,
+            channel="teardown-ch",
+        )
+        # Snapshot the live raw attrs; after teardown they must differ (cooked).
+        raw_attrs = termios.tcgetattr(user_slave)
+        assert not (raw_attrs[3] & termios.ICANON)  # confirm we captured raw state
+        try:
+            assert bridges[0]._thread is not None
+            assert bridges[0]._thread.is_alive()
+        finally:
+            # The cancellation path runs the identical teardown ladder with the
+            # bridge active.
+            await _cancel_and_settle(task)
+        # tty restored to cooked (raw flags gone), relay thread joined, no orphan.
+        restored = termios.tcgetattr(user_slave)
+        assert restored[3] & termios.ICANON
+        assert restored[3] & termios.ECHO
+        assert not bridges[0]._thread.is_alive()
+        _session_torn_down(captured[0])
+        os.close(user_master)
+        os.close(user_slave)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Remediation r1 — _TerminalBridge unit tests: drive the bridge object
+# directly (real pty pairs, no run_launcher) to exercise the relay's EOF /
+# error returns and the two best-effort warning paths (the self-healing
+# branches the full-spawn tests don't reach). Plan §4: cover defensive
+# branches with targeted tests, not pragmas.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestTerminalBridgeUnits:
+    @pytest.mark.asyncio
+    async def test_relay_returns_when_harness_pty_closes(self) -> None:
+        # The most important self-healing path: when the harness PTY goes away,
+        # the relay thread must exit on its own (no hang), even with no stop().
+        loop = asyncio.get_running_loop()
+        user_master, user_slave = os.openpty()
+        h_master, h_slave = os.openpty()
+        bridge = launcher._TerminalBridge(
+            user_stdin_fd=user_slave,
+            user_stdout_fd=user_slave,
+            master_fd=h_master,
+            loop=loop,
+        )
+        bridge.start()
+        try:
+            os.close(h_slave)  # last slave closed → master read raises EIO → return
+            await wait_for(lambda: not bridge._thread.is_alive(), timeout=10.0)
+        finally:
+            bridge.stop()
+            for fd in (user_master, user_slave, h_master):
+                with suppress(OSError):
+                    os.close(fd)
+
+    @pytest.mark.asyncio
+    async def test_relay_prunes_dead_user_stdin_but_keeps_relaying_output(
+        self,
+    ) -> None:
+        # A separate stdout fd lets us kill the stdin user end and still prove
+        # harness output keeps flowing (the stdin watch-list prune branch).
+        loop = asyncio.get_running_loop()
+        in_master, in_slave = os.openpty()
+        out_master, out_slave = os.openpty()
+        h_master, h_slave = os.openpty()
+        os.set_blocking(out_master, False)
+        os.set_blocking(h_slave, False)
+        bridge = launcher._TerminalBridge(
+            user_stdin_fd=in_slave,
+            user_stdout_fd=out_slave,
+            master_fd=h_master,
+            loop=loop,
+        )
+        bridge.start()
+        try:
+            os.close(in_master)  # stdin user end gone → in_slave read errors → pruned
+            await asyncio.sleep(0.1)
+            assert bridge._thread.is_alive()  # pruned stdin, did not exit
+            os.write(h_slave, b"after-prune")
+            await wait_for(_make_drainer(out_master, b"after-prune"), timeout=10.0)
+        finally:
+            bridge.stop()
+            for fd in (in_slave, out_master, out_slave, h_master, h_slave):
+                with suppress(OSError):
+                    os.close(fd)
+
+    @pytest.mark.asyncio
+    async def test_propagate_winsize_on_non_tty_logs_and_continues(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # _propagate_winsize must swallow OSError (best-effort) and warn, never
+        # abort the launch — exercised here on a plain pipe (not a tty).
+        loop = asyncio.get_running_loop()
+        read_fd, write_fd = os.pipe()
+        bridge = launcher._TerminalBridge(
+            user_stdin_fd=read_fd,
+            user_stdout_fd=write_fd,
+            master_fd=write_fd,
+            loop=loop,
+        )
+        with caplog.at_level(logging.WARNING, logger="letterbox.launcher"):
+            bridge._propagate_winsize()  # no start(); pipe → get_winsize raises
+        assert any("window size" in r.getMessage() for r in caplog.records)
+        os.close(read_fd)
+        os.close(write_fd)
+
+    @pytest.mark.asyncio
+    async def test_sigwinch_install_failure_is_tolerated(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # A loop that can't install SIGWINCH (non-POSIX / off-main-thread) must
+        # warn and continue; the relay still runs, teardown still restores.
+        loop = asyncio.get_running_loop()
+        user_master, user_slave = os.openpty()
+        h_master, h_slave = os.openpty()
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise NotImplementedError("signals unavailable on this loop")
+
+        monkeypatch.setattr(loop, "add_signal_handler", _boom)
+        bridge = launcher._TerminalBridge(
+            user_stdin_fd=user_slave,
+            user_stdout_fd=user_slave,
+            master_fd=h_master,
+            loop=loop,
+        )
+        with caplog.at_level(logging.WARNING, logger="letterbox.launcher"):
+            bridge.start()
+        try:
+            assert bridge._sigwinch_installed is False
+            assert any(
+                "SIGWINCH" in r.getMessage() for r in caplog.records
+            )
+            assert bridge._thread is not None and bridge._thread.is_alive()
+        finally:
+            bridge.stop()
+            for fd in (user_master, user_slave, h_master, h_slave):
+                with suppress(OSError):
+                    os.close(fd)
+        assert not bridge._thread.is_alive()
+
+    @pytest.mark.asyncio
+    async def test_stop_is_idempotent(self) -> None:
+        # A second stop() (e.g. signal-handler teardown racing the finally) is a
+        # clean no-op — the early-return guard.
+        loop = asyncio.get_running_loop()
+        user_master, user_slave = os.openpty()
+        h_master, h_slave = os.openpty()
+        bridge = launcher._TerminalBridge(
+            user_stdin_fd=user_slave,
+            user_stdout_fd=user_slave,
+            master_fd=h_master,
+            loop=loop,
+        )
+        bridge.start()
+        bridge.stop()
+        assert not bridge._thread.is_alive()
+        bridge.stop()  # second call: no raise, no double-close
+        assert bridge._stopped is True
+        for fd in (user_master, user_slave, h_master, h_slave):
+            with suppress(OSError):
+                os.close(fd)

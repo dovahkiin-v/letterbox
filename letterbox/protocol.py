@@ -646,10 +646,10 @@ def write_message(
         fsync: If ``True``, fsync the data file AND the parent directory
             after the rename so a crash after the call returns cannot
             lose the message (G5). Default ``False`` matches Vision §9.4
-            ("no fsync by default; ``--strict-fsync`` flag available for
-            paranoid users"). Phase 9a wires the CLI flag; 2c just
-            exposes the seam as a direct parameter (K3 — no config
-            consultation, no global state).
+            (no fsync by default; POSIX rename semantics carry durability
+            for the common case). The durability seam is exposed only as
+            this direct keyword argument — there is no CLI flag and no
+            config consultation (K3 — no global state).
 
     Returns:
         The final :class:`Path` to the renamed ``msg-*.json`` file.

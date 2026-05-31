@@ -23,6 +23,7 @@ import os
 import signal
 import subprocess
 import sys
+import termios
 import textwrap
 import time
 import tty
@@ -34,7 +35,10 @@ from letterbox.adapters import pty_common
 from letterbox.adapters.pty_common import (
     PTYHandle,
     close_pty_handle,
+    get_winsize,
     inject_to_pty,
+    raw_mode,
+    set_winsize,
     spawn_pty,
 )
 from tests.conftest import FakeHarness
@@ -615,6 +619,97 @@ class TestLintNoShellTrue:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# TestWinsize — get_winsize / set_winsize round-trip
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestWinsize:
+    def test_set_then_get_round_trips(self) -> None:
+        master_fd, slave_fd = os.openpty()
+        try:
+            set_winsize(master_fd, 40, 100)
+            # The size is a property of the pty pair, readable from either end.
+            assert get_winsize(master_fd) == (40, 100)
+            assert get_winsize(slave_fd) == (40, 100)
+        finally:
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_resize_updates_both_ends(self) -> None:
+        master_fd, slave_fd = os.openpty()
+        try:
+            set_winsize(master_fd, 24, 80)
+            assert get_winsize(slave_fd) == (24, 80)
+            set_winsize(master_fd, 50, 120)
+            assert get_winsize(slave_fd) == (50, 120)
+        finally:
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_get_winsize_on_non_tty_raises_oserror(self) -> None:
+        r, w = os.pipe()
+        try:
+            with pytest.raises(OSError):
+                get_winsize(r)
+        finally:
+            os.close(r)
+            os.close(w)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# TestRawMode — set-on-entry, restore-on-exit (normal AND exception)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestRawMode:
+    def test_sets_raw_inside_and_restores_on_normal_exit(self) -> None:
+        master_fd, slave_fd = os.openpty()
+        try:
+            saved = termios.tcgetattr(slave_fd)
+            # The slave starts in cooked mode with ECHO + ICANON set.
+            assert saved[3] & termios.ECHO
+            assert saved[3] & termios.ICANON
+            with raw_mode(slave_fd):
+                during = termios.tcgetattr(slave_fd)
+                # Raw mode clears the canonical-input + echo lflags.
+                assert not (during[3] & termios.ECHO)
+                assert not (during[3] & termios.ICANON)
+            # Restored to the exact saved attributes after the block.
+            assert termios.tcgetattr(slave_fd) == saved
+        finally:
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_restores_on_exception(self) -> None:
+        master_fd, slave_fd = os.openpty()
+        try:
+            saved = termios.tcgetattr(slave_fd)
+
+            class _Boom(Exception):
+                pass
+
+            with pytest.raises(_Boom):
+                with raw_mode(slave_fd):
+                    assert not (termios.tcgetattr(slave_fd)[3] & termios.ICANON)
+                    raise _Boom()
+            # The finally cooked the terminal back despite the exception.
+            assert termios.tcgetattr(slave_fd) == saved
+        finally:
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_raw_mode_on_non_tty_raises(self) -> None:
+        r, w = os.pipe()
+        try:
+            with pytest.raises(termios.error):
+                with raw_mode(r):
+                    pass  # pragma: no cover - tcgetattr raises before the body
+        finally:
+            os.close(r)
+            os.close(w)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # TestPublicSurface
 # ──────────────────────────────────────────────────────────────────────
 
@@ -624,7 +719,10 @@ class TestPublicSurface:
         assert set(pty_common.__all__) == {
             "PTYHandle",
             "close_pty_handle",
+            "get_winsize",
             "inject_to_pty",
+            "raw_mode",
+            "set_winsize",
             "spawn_pty",
         }
 

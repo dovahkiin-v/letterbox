@@ -12,11 +12,16 @@ Filled in: Phase 8a/8b/8c per PHASE_INDEX.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import secrets
+import select
 import shutil
 import signal
+import sys
+import termios
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,14 +37,17 @@ from letterbox.notifications import (
     render_notification,
     validate_template,
 )
+from letterbox.adapters.pty_common import get_winsize, raw_mode, set_winsize
 from letterbox.protocol import reap_orphan_tmp
 from letterbox.watcher import Watcher, WatcherEvent
 
 if TYPE_CHECKING:
     # Type-only import: ``PTYHandle`` is the static type of ``LauncherSession.handle``.
-    # Guarded so the launcher carries no *runtime* dependency on ``pty_common`` — it
-    # only ever holds the handle that ``adapter.spawn`` returns (the tier-header
-    # permits ``adapters.pty_common``; this keeps the runtime surface minimal).
+    # The interactive bridge (remediation r1) added a *runtime* dependency on
+    # ``pty_common`` (``get_winsize`` / ``set_winsize`` / ``raw_mode`` above —
+    # tier-legal: Tier 4 may import ``adapters.pty_common``). ``PTYHandle`` stays
+    # type-only because the launcher only ever holds the handle ``adapter.spawn``
+    # returns; it never constructs one.
     from letterbox.adapters.pty_common import PTYHandle
 
 __all__ = [
@@ -183,9 +191,11 @@ async def setup_launcher(
         A :class:`LauncherSession` with the spawned process and started watcher.
 
     Raises:
-        FileNotFoundError: If the state directory is missing (vector: run
-            ``letterbox init``) or the harness command is not on PATH.
-        StatePermissionsError: If the state directory is world-accessible.
+        FileNotFoundError: If the harness command is not on PATH. (A missing
+            state directory is NOT an error — it is auto-created at mode 0700;
+            see ADR-051.)
+        StatePermissionsError: If the state directory exists but is
+            world-accessible (the security gate is unchanged).
         KeyError: If the harness is not a registered adapter, or has no
             ``[harness.<name>]`` config block.
         NotificationTemplateError: If the config-resolved notification template
@@ -198,16 +208,22 @@ async def setup_launcher(
     instance_id = generate_instance_id()
 
     # ── Startup-validation chain (K4) — every check fails loud BEFORE spawn. ──
-    # (1) State-dir permissions; a missing dir becomes a "run letterbox init"
-    #     vector rather than the bare stdlib FileNotFoundError (3a: init creates,
-    #     the launcher refuses).
+    # (1) State dir: self-heal a missing dir by creating it at mode 0700, rather
+    #     than refusing (Framework P5 Self-Healing; ADR-051). This is consistent
+    #     with Channel.get_or_create, which already mkdir(parents=True)s the
+    #     channel subtree — the launcher refusing while the channel layer
+    #     auto-creates was an internal inconsistency that surfaced as a raw
+    #     traceback on a first run. An EXISTING world-accessible dir is still
+    #     refused by check_state_dir_permissions (the security gate is unchanged).
     try:
         check_state_dir_permissions(state_dir)
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(
-            f"letterbox state directory {state_dir} does not exist. "
-            f"Run `letterbox init` to create it."
-        ) from exc
+    except FileNotFoundError:
+        # mkdir's mode is umask-masked, so set 0700 explicitly afterward. This
+        # only ever tightens a dir we just created (the branch is reached only
+        # when stat() raised FileNotFoundError), mirroring `letterbox init
+        # --global` (cli._handle_init).
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(state_dir, 0o700)
 
     # (2) Adapter availability — bootstrap the registry, then resolve. An unknown
     #     harness raises KeyError listing the registered names (get_adapter).
@@ -465,6 +481,241 @@ async def _teardown_runtime(
             cleanup_mcp_config(session.mcp_config_path)
 
 
+def _resolve_user_fd(explicit: int | None, stream: object) -> int | None:
+    """Resolve a user-terminal fd: an explicit override, else the stream's fileno.
+
+    Returns ``None`` when no real fd is available — e.g. pytest has replaced
+    ``sys.stdin`` with a capture object whose ``fileno`` raises — so the caller
+    treats the launch as non-interactive and skips the bridge.
+
+    Args:
+        explicit: An explicit fd passed to :func:`run_launcher` (the pty-pair test
+            seam), or ``None`` to fall back to ``stream``.
+        stream: The standard stream (``sys.stdin`` / ``sys.stdout``) to query.
+
+    Returns:
+        The resolved integer fd, or ``None`` if none is available.
+    """
+    if explicit is not None:
+        return explicit
+    try:
+        return stream.fileno()  # type: ignore[attr-defined]
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+class _TerminalBridge:
+    """Bidirectional byte relay between the controlling tty and the harness PTY.
+
+    The missing interactive link in the PTY-Parent (remediation r1): without it a
+    human sees a blank screen and cannot type to the agent. On the ``script(1)`` /
+    ``pexpect.interact()`` pattern, it does three things for the duration of an
+    interactive session:
+
+    * **Relay** — a single dedicated thread (Vision §2.3: ``os.read``/``os.write``
+      on master fds are blocking, so they belong off the event loop) runs a
+      ``select`` loop shuttling user keystrokes ``user_stdin_fd → master_fd`` and
+      harness output ``master_fd → user_stdout_fd``. The thread is **not** an
+      asyncio lifecycle racer — it is pure byte transport; teardown decisions stay
+      with ``run_launcher``'s three racers.
+    * **Raw mode** — the controlling tty is put in raw mode (via the reusable
+      :func:`~letterbox.adapters.pty_common.raw_mode` primitive held in an
+      ``ExitStack``) so control chars and escape sequences pass through
+      byte-faithfully, and is restored on **every** exit path.
+    * **Window size** — the harness PTY is sized to the user terminal at start and
+      re-sized on ``SIGWINCH`` (handled on the loop's main thread, never the relay
+      thread).
+
+    **Two writers, no lock** (Vision §2.2): both this relay (stdin→master) and the
+    injection loop write ``master_fd``. Injected notifications are short (well under
+    ``PIPE_BUF``), so an ``os.write`` cannot tear a keystroke burst; and the harness
+    echoing injected bytes back through ``master_fd`` is exactly what makes a 📬
+    notification visible on the user's screen.
+
+    **Raw-mode Ctrl-C** (Vision §2.3): raw mode disables ``ISIG``, so the user's
+    ``Ctrl-C`` (``0x03``) is relayed to the agent (correct ``script(1)`` behavior)
+    rather than raising ``SIGINT`` in the launcher. Teardown is driven by harness
+    exit (the user quits the agent) or an external signal — both already handled by
+    the race; this is intended behavior, not a regression.
+
+    Lifecycle is :meth:`start` / :meth:`stop`; ``stop`` is idempotent and
+    partial-start safe (it restores only what ``start`` actually set).
+    """
+
+    # Generous join bound: the self-pipe wakes the relay's ``select`` immediately,
+    # so the join is normally instant. The daemon thread can never block process
+    # exit, so this is belt-and-suspenders only.
+    _RELAY_THREAD_JOIN_TIMEOUT: float = 2.0
+
+    def __init__(
+        self,
+        *,
+        user_stdin_fd: int,
+        user_stdout_fd: int,
+        master_fd: int,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """Record the fds and loop the bridge will operate on (no I/O here).
+
+        Args:
+            user_stdin_fd: The controlling terminal's input fd (read by the relay,
+                put in raw mode).
+            user_stdout_fd: The controlling terminal's output fd (written by the
+                relay with harness output).
+            master_fd: The harness PTY master fd (``session.handle.master_fd``).
+            loop: The running event loop the SIGWINCH handler installs on.
+        """
+        self._user_stdin_fd = user_stdin_fd
+        self._user_stdout_fd = user_stdout_fd
+        self._master_fd = master_fd
+        self._loop = loop
+        self._raw_stack = contextlib.ExitStack()
+        self._pipe_r: int | None = None
+        self._pipe_w: int | None = None
+        self._thread: threading.Thread | None = None
+        self._sigwinch_installed = False
+        self._stopped = False
+
+    def start(self) -> None:
+        """Size the PTY, enter raw mode, start the relay thread, install SIGWINCH.
+
+        Returns:
+            None.
+        """
+        # 1. Initial window size — best-effort; a failure must not abort the launch.
+        self._propagate_winsize()
+        # 2. Raw mode via the reusable primitive, held in an ExitStack so stop()
+        #    restores it idempotently and partial-start-safely.
+        self._raw_stack.enter_context(raw_mode(self._user_stdin_fd))
+        # 3. Self-pipe shutdown channel for the relay thread.
+        self._pipe_r, self._pipe_w = os.pipe()
+        # 4. Relay thread (blocking master-fd I/O lives off the event loop — §2.3).
+        self._thread = threading.Thread(
+            target=self._relay_loop, name="letterbox-pty-relay", daemon=True
+        )
+        self._thread.start()
+        # 5. SIGWINCH on the loop (main thread only), tolerant like SIGINT/SIGTERM.
+        try:
+            self._loop.add_signal_handler(signal.SIGWINCH, self._on_resize)
+        except (NotImplementedError, RuntimeError, ValueError, AttributeError) as exc:
+            _LOGGER.warning(
+                "letterbox: could not install a SIGWINCH handler (%s); window-resize "
+                "propagation is disabled for this session.",
+                exc,
+            )
+        else:
+            self._sigwinch_installed = True
+
+    def stop(self) -> None:
+        """Tear down the bridge: remove SIGWINCH, stop the relay, restore the tty.
+
+        Idempotent and partial-start safe. The tty is restored **last** and
+        unconditionally (in a ``finally``) so it is cooked again before any
+        teardown log lines print to the user's screen.
+
+        Returns:
+            None.
+        """
+        if self._stopped:
+            return
+        self._stopped = True
+        try:
+            # Remove SIGWINCH FIRST so a resize during teardown can't re-enter.
+            if self._sigwinch_installed:
+                with contextlib.suppress(
+                    ValueError, RuntimeError, NotImplementedError
+                ):
+                    self._loop.remove_signal_handler(signal.SIGWINCH)
+                self._sigwinch_installed = False
+            # Wake the relay's select via the self-pipe, then join the thread.
+            if self._pipe_w is not None:
+                with contextlib.suppress(OSError):
+                    os.write(self._pipe_w, b"\x00")
+            if self._thread is not None:
+                self._thread.join(timeout=self._RELAY_THREAD_JOIN_TIMEOUT)
+            # Close the self-pipe (only after the thread that reads it is gone).
+            if self._pipe_r is not None:
+                with contextlib.suppress(OSError):
+                    os.close(self._pipe_r)
+            if self._pipe_w is not None:
+                with contextlib.suppress(OSError):
+                    os.close(self._pipe_w)
+        finally:
+            # Restore the controlling tty LAST (§2.4 step 4). ExitStack.close() is a
+            # no-op if start() never entered the raw_mode context (partial start).
+            # The restore MUST NOT raise past here (§2.4): if the controlling
+            # terminal has vanished mid-session (SSH drop, emulator killed), the
+            # tcsetattr restore raises EIO — log and continue so teardown still
+            # reaps the harness and deletes the temp config (Framework P5 / L6).
+            try:
+                self._raw_stack.close()
+            except (termios.error, OSError) as exc:
+                _LOGGER.warning(
+                    "letterbox: could not restore terminal attributes at teardown "
+                    "(%s); the controlling terminal may have closed.",
+                    exc,
+                )
+
+    def _on_resize(self) -> None:
+        """SIGWINCH handler (main thread): re-mirror the user size onto the PTY."""
+        self._propagate_winsize()
+
+    def _propagate_winsize(self) -> None:
+        """Read the user terminal's size and push it to the harness PTY."""
+        try:
+            rows, cols = get_winsize(self._user_stdin_fd)
+            set_winsize(self._master_fd, rows, cols)
+        except OSError as exc:
+            _LOGGER.warning(
+                "letterbox: could not propagate window size to the harness (%s).",
+                exc,
+            )
+
+    def _relay_loop(self) -> None:
+        """Shuttle bytes both directions until shutdown / EOF (the relay thread)."""
+        watch = [self._user_stdin_fd, self._master_fd, self._pipe_r]
+        while True:
+            try:
+                readable, _, _ = select.select(watch, [], [])
+            except (OSError, ValueError):
+                return  # A watched fd was closed under us — stop relaying.
+            if self._pipe_r in readable:
+                return  # stop() asked us to exit.
+            if self._master_fd in readable:
+                try:
+                    data = os.read(self._master_fd, 4096)
+                except OSError:
+                    return  # EIO/EBADF — the harness PTY is gone.
+                if not data:
+                    return  # master EOF — the harness exited.
+                try:
+                    self._write_all(self._user_stdout_fd, data)
+                except OSError:
+                    return
+            if self._user_stdin_fd in readable:
+                try:
+                    data = os.read(self._user_stdin_fd, 4096)
+                except OSError:
+                    # User end gone; keep relaying harness output to the screen.
+                    watch = [fd for fd in watch if fd != self._user_stdin_fd]
+                    continue
+                if not data:
+                    # User stdin EOF; keep relaying harness output.
+                    watch = [fd for fd in watch if fd != self._user_stdin_fd]
+                    continue
+                try:
+                    self._write_all(self._master_fd, data)
+                except OSError:
+                    return  # Harness PTY closed mid-write.
+
+    @staticmethod
+    def _write_all(fd: int, data: bytes) -> None:
+        """Write all of ``data`` to ``fd``, looping on short writes."""
+        written = 0
+        while written < len(data):
+            written += os.write(fd, data[written:])
+
+
 async def run_launcher(
     harness_name: str,
     channel_name: str,
@@ -473,6 +724,8 @@ async def run_launcher(
     cwd: Path,
     extra_args: list[str] | None = None,
     cli_overrides: dict[str, object] | None = None,
+    user_stdin_fd: int | None = None,
+    user_stdout_fd: int | None = None,
     teardown_timeout: float = 5.0,
 ) -> int:
     """Run a launcher session to completion, then tear it down cleanly (K1).
@@ -498,9 +751,25 @@ async def run_launcher(
     This is a coroutine, not a sync wrapper: it must ``await setup_launcher``,
     create tasks, and ``add_signal_handler`` on a *running* loop. The
     ``asyncio.run(...)`` boundary belongs to the caller (9a), which maps the
-    returned int to ``sys.exit``. There is deliberately no interactive stdin/
-    stdout bridge — the PTY-Parent's duties are spawn / watch / inject / teardown
-    only (§2.1); ``run_launcher`` blocks on lifecycle events, not terminal bytes.
+    returned int to ``sys.exit``.
+
+    When both user fds are real ttys (the interactive case), a
+    :class:`_TerminalBridge` relays bytes between the controlling terminal and the
+    harness PTY: a dedicated thread runs a ``select`` loop shuttling user
+    keystrokes to ``master_fd`` and harness output back to the user's stdout, the
+    controlling tty is put in raw mode (restored on every exit path), and
+    ``SIGWINCH`` propagates window-size changes to the PTY. The relay is pure byte
+    transport and is **not** one of the lifecycle racers — teardown decisions still
+    come solely from the three racers below. Two writers touch ``master_fd`` (this
+    relay and the injection loop) with no lock: injected notifications are well
+    under ``PIPE_BUF`` so an ``os.write`` cannot tear a keystroke burst, and the
+    harness echoing injected bytes back through ``master_fd`` is what makes a 📬
+    notification visible on the user's screen. In raw mode ``ISIG`` is off, so the
+    user's Ctrl-C is relayed to the agent rather than raising ``SIGINT`` here —
+    quitting the agent (harness exit) or an external signal drives teardown, both
+    already handled by the race. Under pytest, pipes, or redirection the fds are not
+    ttys and the bridge is skipped entirely: ``run_launcher`` is then lifecycle-only
+    (spawn / watch / inject / teardown), exactly as before.
 
     Args:
         harness_name: The harness to launch (registry + config key).
@@ -510,6 +779,12 @@ async def run_launcher(
         extra_args: Optional user passthrough args (after the mandatory
             ``--mcp-config <path>``).
         cli_overrides: Optional flat dict forwarded to ``load_config``.
+        user_stdin_fd: Optional override for the controlling terminal's input fd
+            (defaults to ``sys.stdin``). The pty-pair test harness substitutes a
+            fake user terminal here; production leaves it ``None``.
+        user_stdout_fd: Optional override for the controlling terminal's output fd
+            (defaults to ``sys.stdout``). The interactive bridge engages only when
+            both resolved fds are real ttys.
         teardown_timeout: SIGTERM→SIGKILL grace for ``adapter.teardown`` (the
             production default 5.0 doubles as the test seam — tests pass a small
             value to avoid paying the full fake_harness SIGTERM timeout).
@@ -537,6 +812,28 @@ async def run_launcher(
     )
 
     loop = asyncio.get_running_loop()
+
+    # Interactive terminal bridge (§2.6): engage ONLY when both user fds are real
+    # ttys. Under pytest / pipes / redirection (the world the existing suite runs
+    # in) the fds are not ttys, so the bridge is skipped and run_launcher behaves
+    # exactly as the lifecycle-only original — this guard is what keeps that suite
+    # green. ``letterbox claude > log`` is likewise a clean no-op, not a crash.
+    in_fd = _resolve_user_fd(user_stdin_fd, sys.stdin)
+    out_fd = _resolve_user_fd(user_stdout_fd, sys.stdout)
+    bridge: "_TerminalBridge | None" = None
+    if (
+        in_fd is not None
+        and out_fd is not None
+        and os.isatty(in_fd)
+        and os.isatty(out_fd)
+    ):
+        bridge = _TerminalBridge(
+            user_stdin_fd=in_fd,
+            user_stdout_fd=out_fd,
+            master_fd=session.handle.master_fd,
+            loop=loop,
+        )
+
     signal_event = asyncio.Event()
 
     def _on_signal() -> None:
@@ -566,14 +863,22 @@ async def run_launcher(
     signal_task = asyncio.create_task(signal_event.wait())
     racers: list[asyncio.Task[object]] = [injection_task, proc_task, signal_task]
     try:
+        # Start the bridge inside the try so its stop() is guaranteed by the
+        # finally even if start() partially completes (stop() is partial-safe).
+        if bridge is not None:
+            bridge.start()
         await asyncio.wait(racers, return_when=asyncio.FIRST_COMPLETED)
     finally:
         # Un-register signals FIRST (K3 step 1) so a second signal during
         # teardown can't re-enter and a later run_launcher in the same process
-        # starts clean. Then run the resource ladder — reached on signal,
-        # process-exit, loop-return, AND cancellation of this coroutine.
+        # starts clean. Then stop the bridge — restoring the controlling tty
+        # BEFORE the teardown ladder's logs print (so they aren't rendered raw) —
+        # and finally run the resource ladder. Reached on signal, process-exit,
+        # loop-return, AND cancellation of this coroutine.
         for sig in installed_signals:
             loop.remove_signal_handler(sig)
+        if bridge is not None:
+            bridge.stop()
         await _teardown_runtime(
             session, racers, teardown_timeout=teardown_timeout
         )

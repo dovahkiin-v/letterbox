@@ -73,7 +73,7 @@ _EXPECTED_TIER_HEADER = [
     '"""argparse top-level dispatch — routes subcommands to launcher / mcp_server / utility handlers.',
     "",
     "Tier: 4",
-    "May import from: stdlib (including ``argparse``); Tier 1 (``config``, ``protocol``); Tier 2 (``channel``).",
+    "May import from: stdlib (including ``argparse``); Tier 1 (``config``, ``notifications``, ``protocol``); Tier 2 (``channel``).",
     "Must NOT import from: ``letterbox.launcher`` or ``letterbox.mcp_server`` at module load time —",
     "    those are imported LAZILY inside their respective subcommand handlers (bulkhead §13.5,",
     "    avoids cross-sibling-Tier-4 module-load dependency).",
@@ -286,6 +286,197 @@ class TestArgparseErrors:
             cli.main(["claude"])
         assert exc.value.code == 2
         assert "--channel" in capsys.readouterr().err
+
+
+# ──────────────────────────────────────────────────────────────────────
+# TestConfigErrorBoundary — a bad --config surfaces as a vector, not a traceback
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestConfigErrorBoundary:
+    """A malformed ``--config`` must produce a clean one-line stderr vector and
+    ``return 1`` — never a raw Python traceback (Framework P3 / r1).
+
+    The single ``main()`` guard covers all three consumer paths that reach
+    ``config.load_config``; this exercises a *sync handler* (``list-channels`` →
+    ``_resolve_state_dir``) and the *harness path* (``claude`` →
+    ``asyncio.run(run_launcher)`` → ``setup_launcher``'s first line). No mocking:
+    ``load_config`` raises before any state-dir touch or PTY spawn.
+    """
+
+    @staticmethod
+    def _write_bad_config(tmp_path: Path) -> Path:
+        """Write a malformed TOML file and return its path (mirrors the brief repro)."""
+        bad = tmp_path / "bad.toml"
+        bad.write_text("this is = = not valid toml [[[\n")
+        return bad
+
+    def test_sync_handler_bad_config_is_vector_not_traceback(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        bad = self._write_bad_config(tmp_path)
+        rc = cli.main(["--config", str(bad), "list-channels"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        # Stable fragment of the tomllib reason (varies by Python micro-version)
+        # plus the file path — the formatted vector, not the wall.
+        assert "malformed TOML" in captured.err
+        assert str(bad) in captured.err
+        # Core regression: no traceback leaks to either stream.
+        assert "Traceback" not in captured.err
+        assert "Traceback" not in captured.out
+
+    def test_harness_path_bad_config_is_vector_not_traceback(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        bad = self._write_bad_config(tmp_path)
+        rc = cli.main(["--config", str(bad), "claude", "--channel", "c"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "malformed TOML" in captured.err
+        assert str(bad) in captured.err
+        assert "Traceback" not in captured.err
+        assert "Traceback" not in captured.out
+
+
+# ──────────────────────────────────────────────────────────────────────
+# TestHarnessStartupErrorBoundary — the four expected pre-spawn launcher
+# errors render as one-line stderr vectors, never tracebacks (C2-3 / ADR-053)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestHarnessStartupErrorBoundary:
+    """Every EXPECTED pre-spawn startup error from ``run_launcher``'s validation
+    chain must surface as a clean ``letterbox: <vector>`` line on stderr and
+    ``return 1`` — never a raw traceback (Framework P3 / C2-3 / ADR-053).
+
+    The four types: ``FileNotFoundError`` (command not on PATH), ``KeyError``
+    (unknown adapter / missing ``[harness.<name>]`` block),
+    ``StatePermissionsError`` (existing world-accessible state dir), and
+    ``NotificationTemplateError`` (invalid configured template). Each is driven
+    through the REAL ``run_launcher`` via ``cli.main([...])`` — NOT asserted at
+    the ``setup_launcher`` level — because the gap C2-3 closes is precisely that
+    the boundary renders them, not merely that they are raised.
+
+    ``tmp_letterbox_home`` isolates the state dir (created 0700, so the
+    permissions check passes for the cases that must reach later checks). The
+    config-driven cases write a real ``--config`` TOML; the others force the
+    condition at its real raise-site.
+    """
+
+    @staticmethod
+    def _write_config(tmp_path: Path, *, command: str, template: str) -> Path:
+        """Write a valid ``--config`` TOML whose ``[harness.claude]`` block
+        replaces the default, and return its path. Both ``command`` and
+        ``notification_template`` are required by the config parser."""
+        cfg = tmp_path / "lb.toml"
+        cfg.write_text(
+            "[harness.claude]\n"
+            f'command = "{command}"\n'
+            f'notification_template = "{template}"\n',
+            encoding="utf-8",
+        )
+        return cfg
+
+    @staticmethod
+    def _assert_clean_vector(captured: pytest.CaptureResult, rc: int) -> str:
+        """Assert the exit code is 1, no traceback leaked to either stream, and
+        the stderr carries the ``letterbox:`` vector prefix. Return stderr."""
+        assert rc == 1
+        assert "Traceback" not in captured.err
+        assert "Traceback" not in captured.out
+        assert "letterbox:" in captured.err
+        return captured.err
+
+    def test_command_not_on_path_is_vector_not_traceback(
+        self,
+        tmp_letterbox_home: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # A configured harness command that is not on PATH → FileNotFoundError
+        # from the launcher's PATH check (launcher.py §K4 step 5). Deterministic:
+        # this binary name cannot exist on PATH.
+        cfg = self._write_config(
+            tmp_path,
+            command="letterbox-no-such-binary-zzz999",
+            template="📬 Peer message on channel {channel}.",
+        )
+        rc = cli.main(["--config", str(cfg), "claude", "--channel", "c"])
+        err = self._assert_clean_vector(capsys.readouterr(), rc)
+        assert "not on PATH" in err
+        assert "letterbox-no-such-binary-zzz999" in err
+
+    def test_bad_notification_template_is_vector_not_traceback(
+        self,
+        tmp_letterbox_home: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # A configured template referencing the forbidden ``{body}`` variable →
+        # NotificationTemplateError (launcher.py §K4 step 4), which fires BEFORE
+        # the PATH check, so the command value is irrelevant.
+        cfg = self._write_config(
+            tmp_path, command="claude", template="📬 {body}"
+        )
+        rc = cli.main(["--config", str(cfg), "claude", "--channel", "c"])
+        err = self._assert_clean_vector(capsys.readouterr(), rc)
+        # The NotificationTemplateError message names the offending variable.
+        assert "body" in err
+
+    def test_world_accessible_state_dir_is_vector_not_traceback(
+        self,
+        tmp_letterbox_home: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # An EXISTING world-accessible state dir → StatePermissionsError from the
+        # security gate (launcher.py §K4 step 1; the gate ADR-051 left unchanged).
+        # 0o777 is fully permissive, so pytest's tmp_path teardown still traverses
+        # it — no try/finally restore needed (unlike the 0o000 case, 3a notes).
+        os.chmod(tmp_letterbox_home, 0o777)
+        rc = cli.main(["claude", "--channel", "c"])
+        err = self._assert_clean_vector(capsys.readouterr(), rc)
+        # The permissions vector points the user at the fix.
+        assert "0700" in err or "world" in err.lower()
+
+    def test_unknown_adapter_keyerror_is_vector_not_traceback(
+        self,
+        tmp_letterbox_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # KeyError is unreachable for the three built-in harnesses via config
+        # alone (DEFAULT_HARNESSES always populates them), so force it at the real
+        # raise-site (get_adapter) to assert the boundary renders it cleanly —
+        # including the quote-unwrap (KeyError stringifies as repr(arg)).
+        def _raise_unknown(name: str):
+            raise KeyError(
+                f"Unknown harness {name!r}. "
+                "Registered adapters: ['antigravity', 'claude', 'gemini']."
+            )
+
+        monkeypatch.setattr("letterbox.launcher.get_adapter", _raise_unknown)
+        rc = cli.main(["claude", "--channel", "c"])
+        err = self._assert_clean_vector(capsys.readouterr(), rc)
+        assert "Unknown harness" in err
+        # Quote-unwrap working: the message follows ``letterbox: `` directly, with
+        # no stray leading quote from KeyError's repr-style str().
+        vector_line = next(
+            line for line in err.splitlines() if line.startswith("letterbox:")
+        )
+        body = vector_line[len("letterbox:") :].lstrip()
+        assert not body.startswith("'")
+        assert not body.startswith('"')
+
+    def test_format_startup_error_unwraps_keyerror(self) -> None:
+        # Unit-level guard on the rendering helper: KeyError loses its repr quotes,
+        # every other type stringifies normally.
+        assert cli._format_startup_error(KeyError("no foo")) == "no foo"
+        assert cli._format_startup_error(FileNotFoundError("gone")) == "gone"
+        assert (
+            cli._format_startup_error(channel.StatePermissionsError("bad perms"))
+            == "bad perms"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────

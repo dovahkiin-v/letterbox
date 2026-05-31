@@ -1,7 +1,7 @@
 """argparse top-level dispatch — routes subcommands to launcher / mcp_server / utility handlers.
 
 Tier: 4
-May import from: stdlib (including ``argparse``); Tier 1 (``config``, ``protocol``); Tier 2 (``channel``).
+May import from: stdlib (including ``argparse``); Tier 1 (``config``, ``notifications``, ``protocol``); Tier 2 (``channel``).
 Must NOT import from: ``letterbox.launcher`` or ``letterbox.mcp_server`` at module load time —
     those are imported LAZILY inside their respective subcommand handlers (bulkhead §13.5,
     avoids cross-sibling-Tier-4 module-load dependency).
@@ -25,7 +25,7 @@ from pathlib import Path
 # forbids only the two heavy Tier-4 siblings (``launcher``/``mcp_server``),
 # which stay lazy inside their handlers. Mirrors how ``mcp_server`` (also
 # Tier 4) imports ``channel``/``config``/``protocol`` at module top.
-from letterbox import channel, config, protocol
+from letterbox import channel, config, notifications, protocol
 
 __all__ = ["main"]
 
@@ -88,27 +88,41 @@ def main(argv: list[str] | None = None) -> int:
     # trap — a drifted spelling makes the agent's MCP child parse-error on spawn
     # and the channel goes silent with no error anyone looks for. Forward raw,
     # never re-parse.
-    if raw and raw[0] == "mcp":
-        return _dispatch_mcp(raw[1:])
+    try:
+        if raw and raw[0] == "mcp":
+            return _dispatch_mcp(raw[1:])
 
-    # K1 — manual ``--`` passthrough split (NOT argparse.REMAINDER): everything
-    # after the FIRST ``--`` is verbatim harness extra-args (§7.2). Deterministic,
-    # and sidesteps argparse's REMAINDER quirks.
-    pre, extra_args = _split_passthrough(raw)
-    parser = _build_parser()
-    # parse_known_args (not parse_args) so ``mcp`` can absorb leftover argv —
-    # argparse.REMAINDER refuses leading optional-looking tokens (``--channel``)
-    # on 3.13 subparsers, so REMAINDER is unusable here. The ``unknown`` leftovers
-    # are forwarded raw by ``mcp``; every other subcommand rejects any leftover
-    # below (the transitional stubs were all replaced through 9a-9d).
-    args, unknown = parser.parse_known_args(pre)
-    # Subcommands with a fixed, closed flag surface — reject stray flags with a
-    # vector error (Framework P3 / G2). ``mcp`` is the sole subcommand that
-    # deliberately absorbs leftover argv (forwarding it raw to the MCP child);
-    # all others are in ``_REJECTS_UNKNOWN``.
-    if args.command in _REJECTS_UNKNOWN and unknown:
-        parser.error(f"unrecognized arguments: {' '.join(unknown)}")
-    return args.handler(args, extra_args, unknown)
+        # K1 — manual ``--`` passthrough split (NOT argparse.REMAINDER): everything
+        # after the FIRST ``--`` is verbatim harness extra-args (§7.2). Deterministic,
+        # and sidesteps argparse's REMAINDER quirks.
+        pre, extra_args = _split_passthrough(raw)
+        parser = _build_parser()
+        # parse_known_args (not parse_args) so ``mcp`` can absorb leftover argv —
+        # argparse.REMAINDER refuses leading optional-looking tokens (``--channel``)
+        # on 3.13 subparsers, so REMAINDER is unusable here. The ``unknown`` leftovers
+        # are forwarded raw by ``mcp``; every other subcommand rejects any leftover
+        # below (the transitional stubs were all replaced through 9a-9d).
+        args, unknown = parser.parse_known_args(pre)
+        # Subcommands with a fixed, closed flag surface — reject stray flags with a
+        # vector error (Framework P3 / G2). ``mcp`` is the sole subcommand that
+        # deliberately absorbs leftover argv (forwarding it raw to the MCP child);
+        # all others are in ``_REJECTS_UNKNOWN``.
+        if args.command in _REJECTS_UNKNOWN and unknown:
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+        return args.handler(args, extra_args, unknown)
+    except config.ConfigError as exc:
+        # A malformed/invalid --config (or LETTERBOX_CONFIG) surfaces as a clean
+        # single-line vector, never a traceback (Framework P3). The message
+        # already carries the "<file>:<line> -- <reason>" vector (config.py). This
+        # single boundary covers all three consumer paths that reach
+        # ``load_config``: the sync handlers (via ``_resolve_state_dir``), the
+        # ``asyncio.run(run_launcher)`` harness path, and the ``mcp`` child path
+        # (``_dispatch_mcp`` → ``mcp_server.run``). At the top-level boundary the
+        # subcommand isn't always known, so the bare ``letterbox:`` prefix is the
+        # honest house-style choice. ``parser.error`` raises ``SystemExit`` (code
+        # 2), not ``ConfigError``, so bogus-flag exits pass through untouched.
+        print(f"letterbox: {exc}", file=sys.stderr)
+        return 1
 
 
 def _split_passthrough(raw: list[str]) -> tuple[list[str], list[str]]:
@@ -335,16 +349,60 @@ def _handle_harness(
 
     from letterbox import launcher
 
-    return asyncio.run(
-        launcher.run_launcher(
-            args.harness_name,
-            args.channel,
-            as_label=args.as_label,
-            cwd=cwd,
-            extra_args=extra_args,
-            cli_overrides=None,
+    try:
+        return asyncio.run(
+            launcher.run_launcher(
+                args.harness_name,
+                args.channel,
+                as_label=args.as_label,
+                cwd=cwd,
+                extra_args=extra_args,
+                cli_overrides=None,
+            )
         )
-    )
+    except (
+        FileNotFoundError,
+        KeyError,
+        channel.StatePermissionsError,
+        notifications.NotificationTemplateError,
+    ) as exc:
+        # The harness-path error-vector contract (ADR-053, extending ADR-050/051).
+        # These four types are the EXPECTED pre-spawn startup failures from
+        # ``run_launcher``'s validation chain (launcher.py §K4): harness command
+        # not on PATH (``FileNotFoundError``); unknown adapter / missing
+        # ``[harness.<name>]`` block (``KeyError``); an existing world-accessible
+        # state dir (``StatePermissionsError``); an invalid configured notification
+        # template (``NotificationTemplateError``). Render each as a one-line stderr
+        # vector + exit 1 (Framework P3) — never a traceback wall.
+        #
+        # Scoped to the HARNESS dispatch, not the ``main()`` boundary: unlike
+        # ``ConfigError`` (caught at ``main()`` because ``load_config`` spans all
+        # three consumer paths), these four are raised ONLY here. ``FileNotFoundError``
+        # /``KeyError`` are builtins the utility handlers (tail/prune/init) raise in
+        # normal operation, so a whole-``main()`` catch would mask genuine bugs there.
+        # NO bare ``except Exception`` — genuine bugs still traceback (the index's
+        # load-bearing constraint).
+        print(f"letterbox: {_format_startup_error(exc)}", file=sys.stderr)
+        return 1
+
+
+def _format_startup_error(exc: BaseException) -> str:
+    """Render a launcher startup error as a clean one-line vector message.
+
+    ``KeyError`` stringifies as ``repr(self.args[0])`` — it wraps the message in
+    quotes (``str(KeyError("no foo")) == '\\'no foo\\''``). Unwrap it to the bare
+    message so the vector reads cleanly. Every other expected startup type already
+    stringifies to its human-facing message.
+
+    Args:
+        exc: The caught startup exception.
+
+    Returns:
+        The human-facing message, without ``KeyError``'s quote wrapping.
+    """
+    if isinstance(exc, KeyError) and exc.args:
+        return str(exc.args[0])
+    return str(exc)
 
 
 def _handle_mcp(
