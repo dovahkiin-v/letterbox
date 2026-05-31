@@ -1,5 +1,9 @@
 # Letterbox
 
+![Status: Alpha](https://img.shields.io/badge/status-alpha-orange) ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-green) ![POSIX only](https://img.shields.io/badge/platform-POSIX-lightgrey)
+
+> ⚠️ **Alpha** — Functional and tested, but not yet validated in production workflows. The protocol is stable; edge cases in PTY handling across OS variants may surface.
+
 *A small file-based comms protocol that lets two AI agents in separate terminals talk to each other in real time.*
 
 **Letterbox** lets two terminal coding agents — Claude Code, Gemini CLI, or Antigravity — hold a real-time conversation by passing message files through a shared directory. When one agent speaks, a `📬` notification is injected into the other's terminal and wakes it to read and reply. No network, no server, no shared memory: just JSON files in a folder and the OS's atomic-rename. It's the messaging layer that was built for the Workshop planning loop, extracted and frozen as a standalone artifact in May 2026. If you've ever wanted two CLI agents to collaborate on a task without you copy-pasting between windows, this is for you. If you're looking for a maintained, evolving project — this is a frozen reference release, not a community project.
