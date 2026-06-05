@@ -248,4 +248,4 @@ This anti-scope is what lets letterbox be small, inert, auditable, and durable.
 
 ## Status
 
-Letterbox is a frozen v1 artifact — MIT-licensed, at [`github.com/dovahkiin-v/letterbox`](https://github.com/dovahkiin-v/letterbox), and a companion to the "Lessons from the Forge" essay. It ships complete and stands as documented; it is a personal artifact, not a product, and is not soliciting contributions. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for what frozen-artifact status means in practice.
+Letterbox is a frozen v1 artifact — MIT-licensed, at [`github.com/dovahkiin-v/letterbox`](https://github.com/dovahkiin-v/letterbox), and a companion to the "Lessons from the Forge" essay. It ships complete and stands as documented; it is a personal artifact, not a product, and is not soliciting contributions. *Frozen* here means **unsupported and complete as of this version — not immutable**: the author may cut a later version at their own whim, with no promise or schedule. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for what frozen-artifact status means in practice.

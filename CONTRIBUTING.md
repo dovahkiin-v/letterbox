@@ -11,6 +11,13 @@ system as of June 2026" — a companion to the *Lessons from the Forge* essay,
 and a personal artifact rather than a product. There is **no commitment to
 issues, pull requests, or releases beyond v1.**
 
+**Frozen here means *unsupported and complete as of this version* — not
+*immutable*.** What is frozen is the obligation *to others*, never the
+author's freedom to revise their own work. The author may cut a later version
+if and when they want to; there's simply no promise, schedule, or obligation
+to. Think frozen like a lake, not a fossil: still and solid now, the same
+water, free to thaw when the author decides the season has changed.
+
 This isn't a brush-off. The author doesn't run a community-support cadence,
 and honest framing beats implied promises of maintenance. The code stands as
 documented; the [`DECISIONS.md`](DECISIONS.md) log records the *why* behind
@@ -34,9 +41,12 @@ the artifact trustworthy without turning it into a moving target.
 
 ## Feature requests
 
-Feature ideas are **recorded, not actioned.** New directions may be noted on
-the "considered, deferred" list below, but they won't ship in v1, and there's
-no promised v2. If you need a feature, fork and build it — the architecture is
+Feature ideas from others are **recorded, not actioned.** New directions may
+be noted on the "considered, deferred" list below, but none are promised —
+there's no roadmap and no scheduled release. The author may fold an
+improvement into a future version on their own initiative, but that's a
+choice, never a commitment, and never something an external request obligates.
+If you need a feature now, fork and build it — the architecture is
 designed to make that straightforward (the adapter base class and TOML
 registry, for instance, accommodate a new harness by config alone).
 
