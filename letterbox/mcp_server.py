@@ -11,6 +11,7 @@ Filled in: Phase 7a/7b/7c/7d per PHASE_INDEX.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from mcp.server.fastmcp import FastMCP
@@ -24,12 +25,24 @@ from letterbox.config import load_config
 from letterbox.protocol import (
     Message,
     is_valid_message_filename,
+    list_messages,
     make_message_filename,
     new_message,
     write_message,
 )
 
 __all__ = ["run"]
+
+# The agent-facing explanation surfaced both as the dormant ``channel_info``
+# detail and as the error every messaging tool raises when called with no
+# active bridge (ADR-056). Phrased for the AGENT: it says what is true and what
+# a human must do, so the agent can relay accurately instead of guessing.
+_NOT_BRIDGED_DETAIL = (
+    "letterbox is loaded but no channel is set, so there is no active bridge to "
+    "a peer. A human starts one by launching `letterbox <harness> --channel "
+    "<name> --as <label>` (and the peer the same way, on the same channel). "
+    "Call channel_info at any time to re-check the bridge state."
+)
 
 
 def _message_to_dict(msg: Message) -> dict:
@@ -82,6 +95,23 @@ def run(argv: list[str] | None = None) -> None:
     clean exit, because the server owns no state outside the filesystem
     (K4, Vision §6.3).
 
+    Three startup dispositions (ADR-056):
+
+    * **Bridged** — all three join keys resolved (flags or env): open the
+      channel and build the full six-tool server.
+    * **Dormant** — join keys missing AND stdin is not a TTY, i.e. an MCP host
+      spawned us with no channel (the letterbox server left in a harness's
+      user-level settings, started by a plain session). Build the server with
+      ``channel=None``: it connects cleanly so the harness shows a calm
+      "connected", but every messaging tool fails loud the moment it is called
+      and ``channel_info`` reports ``{"bridged": false}``. A deliberate plain
+      session stays quiet; a genuinely misconfigured bridge surfaces at first
+      use rather than going silently dark (Vision §7.1).
+    * **Human misuse** — join keys missing AND stdin IS a TTY, i.e. a person
+      ran ``letterbox mcp`` by hand (you never do this — the harness spawns it).
+      Fail loud to stderr with exit 2 instead of hanging on a stdio handshake
+      that will never arrive.
+
     Args:
         argv: Argument vector after the ``mcp`` token (``--channel``/``--as``/
             ``--instance-id``). ``None`` falls back to ``sys.argv[1:]`` so the
@@ -93,20 +123,53 @@ def run(argv: list[str] | None = None) -> None:
         the process is signalled.
     """
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    channel = _open_channel(args)
-    server = _build_server(channel, args.instance_id)
+    missing = _missing_join_keys(args)
+    if not missing:
+        channel = _open_channel(args)
+        _align_read_marker(channel, args.instance_id)
+        server = _build_server(channel, args.instance_id)
+    elif sys.stdin.isatty():
+        sys.stderr.write(
+            "letterbox mcp: missing join-key value(s): "
+            + ", ".join(missing)
+            + " — supply each as a flag or its environment variable. You "
+            "normally never run `letterbox mcp` yourself; the harness spawns "
+            "it. See the README.\n"
+        )
+        raise SystemExit(2)
+    else:
+        server = _build_server(None, None)
     server.run("stdio")
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    """Parse the W13 join-key flags — the load-bearing spelling contract (K1).
+    """Parse the join-key invocation — flags OR environment (K1, ADR-055).
 
-    The three flag spellings (``--channel``, ``--as``, ``--instance-id``) MUST
-    match byte-for-byte what 5c's ``generate_mcp_config`` emits (locked by 6d
-    Family B). A divergence makes the agent's MCP child parse-error the instant
-    it spawns and the channel goes silent with no error anyone thinks to look
-    for (Vision §7.1). All three are required; argparse rejects a missing one
-    with a vector message on stderr and exit code 2.
+    The three join-key values (``--channel`` / ``--as`` / ``--instance-id``)
+    can arrive two ways:
+
+    * **As flags** — the self-contained ``--mcp-config`` path. 5c's
+      ``generate_mcp_config`` bakes them into the agent's MCP config, so a
+      flag-wired harness (Claude) spawns ``letterbox mcp --channel … --as …
+      --instance-id …``. The spellings MUST match what ``generate_mcp_config``
+      emits byte-for-byte (locked by 6d Family B).
+    * **As environment variables** — ``LETTERBOX_CHANNEL`` /
+      ``LETTERBOX_SENDER`` / ``LETTERBOX_INSTANCE_ID``. The launcher exports
+      all three into the harness's spawn env (ADR-055), so a settings-wired
+      harness whose CLI has no ``--mcp-config`` flag (Gemini, Antigravity) can
+      declare ONE fixed, channel-agnostic ``["mcp"]`` server in its settings
+      and still receive the per-launch channel/identity at runtime. This
+      mirrors the Forge tower orchestrator passing the channel via
+      ``FORGE_DIALOGUE_CHANNEL`` — the user never edits settings per channel.
+
+    Flags win over the environment when both are present (an explicit
+    invocation is the stronger signal). Resolution is *lenient*: a value absent
+    from BOTH sources comes back as ``None``. :func:`run` decides what that
+    means — start DORMANT when an MCP host spawned us with no channel (the
+    letterbox server left in a harness's user-level settings, a plain session
+    with no bridge — ADR-056), or fail loud when a human ran the command
+    directly (a TTY). Either way the never-silently-dark contract holds: a
+    misconfigured *bridge* surfaces, but a deliberate plain session stays calm.
 
     The ``--as`` flag maps to ``dest="sender_label"`` because ``as`` is a
     Python keyword — ``args.as`` would be a ``SyntaxError`` (G1).
@@ -115,7 +178,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         argv: The argument vector to parse (everything after the ``mcp`` token).
 
     Returns:
-        Namespace with ``channel``, ``sender_label``, and ``instance_id``.
+        Namespace with ``channel``, ``sender_label``, and ``instance_id``; each
+        is a non-empty ``str`` when supplied, else ``None``.
     """
     parser = argparse.ArgumentParser(
         prog="letterbox mcp",
@@ -123,21 +187,47 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--channel",
-        required=True,
-        help="Channel name to open (the directory under <state_dir>/channels/).",
+        default=None,
+        help="Channel name to open (else $LETTERBOX_CHANNEL).",
     )
     parser.add_argument(
         "--as",
         dest="sender_label",
-        required=True,
-        help="This endpoint's identity on the channel (resolved by the launcher).",
+        default=None,
+        help="This endpoint's identity on the channel (else $LETTERBOX_SENDER).",
     )
     parser.add_argument(
         "--instance-id",
-        required=True,
-        help="Per-launch instance id (the watcher/own-write join key, ADR-011).",
+        default=None,
+        help="Per-launch instance id, the watcher/own-write join key "
+        "(else $LETTERBOX_INSTANCE_ID; ADR-011).",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    # Environment fallback (ADR-055): flags win, env fills the gaps, an empty
+    # string counts as "not supplied" (mirrors resolve_sender_label's guard).
+    args.channel = args.channel or os.environ.get("LETTERBOX_CHANNEL") or None
+    args.sender_label = (
+        args.sender_label or os.environ.get("LETTERBOX_SENDER") or None
+    )
+    args.instance_id = (
+        args.instance_id or os.environ.get("LETTERBOX_INSTANCE_ID") or None
+    )
+    return args
+
+
+# Each join key paired with the human-readable "flag / $ENV" spelling used in
+# the dormant-state detail and the human-misuse error (ADR-055/056).
+_JOIN_KEY_SPECS: tuple[tuple[str, str], ...] = (
+    ("channel", "--channel / $LETTERBOX_CHANNEL"),
+    ("sender_label", "--as / $LETTERBOX_SENDER"),
+    ("instance_id", "--instance-id / $LETTERBOX_INSTANCE_ID"),
+)
+
+
+def _missing_join_keys(args: argparse.Namespace) -> list[str]:
+    """Return the ``flag / $ENV`` spellings of any unresolved join keys."""
+    return [spec for attr, spec in _JOIN_KEY_SPECS if not getattr(args, attr)]
 
 
 def _open_channel(args: argparse.Namespace) -> Channel:
@@ -169,25 +259,85 @@ def _open_channel(args: argparse.Namespace) -> Channel:
     )
 
 
-def _build_server(channel: Channel, instance_id: str) -> FastMCP:
+def _align_read_marker(channel: Channel, instance_id: str) -> None:
+    """Advance the read marker to the channel's latest message at launch (ADR-058).
+
+    Aligns this endpoint's ``high_water_mark`` with the watcher's *start
+    watermark* (ADR-024): the watcher records the newest filename present at
+    init and only notifies about messages that arrive strictly after it, so a
+    restart is a clean "fresh start", not a replay of the whole backlog. But
+    the read marker (which ``check_messages`` filters on) only ever moved on an
+    explicit ``acknowledge`` — so a relaunched session whose marker lagged the
+    watermark would surface the entire cross-session backlog as "unread" the
+    moment the agent ran a catch-up read, contradicting the calm restart the
+    watcher already delivers. This re-syncs the two positions at launch: every
+    message already on disk is treated as read, so the inbox starts as
+    "messages since I launched". The peer's history stays reachable on demand
+    via ``check_messages(since_id=...)``.
+
+    Monotonic and idempotent. :meth:`Channel.acknowledge` clamps to
+    ``max(current_hwm, latest)``, so a relaunch never rewinds a marker the
+    previous session advanced further (e.g. via ``since_id`` catch-up), and an
+    empty channel — no messages yet — is a no-op (nothing to acknowledge). The
+    latest stem is taken from ``list_messages`` (filename enumeration only — no
+    JSON parse), regardless of sender: own writes are filtered downstream, so
+    the marker simply means "everything up to launch is not new".
+
+    Args:
+        channel: The opened channel whose read marker is aligned.
+        instance_id: The per-launch instance id written into the marker file.
+
+    Returns:
+        None.
+    """
+    paths = list_messages(channel.path, since=None)
+    if not paths:
+        return
+    channel.acknowledge(paths[-1].stem, self_instance_id=instance_id)
+
+
+def _build_server(
+    channel: Channel | None, instance_id: str | None
+) -> FastMCP:
     """Build the ``FastMCP("letterbox")`` server with the six §6.1 tools.
 
     This is the testable seam: it returns the configured server *without*
     entering the blocking stdio loop, so tests can introspect the registry
     (:meth:`FastMCP.list_tools`) and the generated input schemas. The six
-    tools were registered here (7a) and their bodies filled across 7b/7c/7d
-    (now complete — no stub remains). The closures capture ``channel`` and
-    ``instance_id`` so the tool bodies have the trusted server-side identity
-    context (§13.3) without module globals.
+    tools were registered here (7a) and their bodies filled across 7b/7c/7d.
+    The closures capture ``channel`` and ``instance_id`` so the tool bodies
+    have the trusted server-side identity context (§13.3) without module
+    globals.
+
+    When ``channel`` is ``None`` the server is **dormant** (ADR-056): it
+    registers and connects identically (same tool names, same schemas — so the
+    harness shows a calm "connected"), but the four messaging tools fail loud
+    via :func:`_require_bridge` the moment they are called, and ``channel_info``
+    reports ``{"bridged": false}``. ``list_channels`` still works dormant (it
+    is filesystem enumeration, not a per-channel operation), so the agent can
+    still see what channels exist.
 
     Args:
-        channel: The opened channel the tools read from and write to.
-        instance_id: The per-launch instance id (own-write join key, ADR-011).
+        channel: The opened channel the tools read from and write to, or
+            ``None`` for a dormant server (no active bridge).
+        instance_id: The per-launch instance id (own-write join key, ADR-011),
+            or ``None`` when dormant.
 
     Returns:
         A ready-to-run ``FastMCP`` instance with all six tools registered.
     """
     server = FastMCP("letterbox")
+
+    def _require_bridge() -> None:
+        """Fail loud when a messaging tool is called with no active bridge.
+
+        The dormant-mode counterpart of "never silently dark" (Vision §7.1):
+        a plain session never *triggers* this (it just doesn't call the tool),
+        but a misconfigured bridge — or an agent that tries to send before the
+        human launched the peer — gets a clear, actionable error at first use.
+        """
+        if channel is None:
+            raise RuntimeError(_NOT_BRIDGED_DETAIL)
 
     @server.tool()
     def send_message(body: str, in_reply_to: str | None = None) -> dict:
@@ -195,8 +345,10 @@ def _build_server(channel: Channel, instance_id: str) -> FastMCP:
 
         The agent does NOT pass sender or recipient — those are populated
         server-side from the launch identity (§3.2). Bodies over 5 MB are
-        rejected with MessageTooLarge before any disk I/O.
+        rejected with MessageTooLarge before any disk I/O. Errors if there is
+        no active bridge — call channel_info first if unsure.
         """
+        _require_bridge()
         # K4 — identity is server-side: sender from the launcher-resolved
         # channel handle, instance_id from the captured launch id. The
         # signature has no identity parameter, so agent-supplied identity
@@ -223,6 +375,7 @@ def _build_server(channel: Channel, instance_id: str) -> FastMCP:
         they say?" — no pagination, no risk of context bombing. Does not
         advance this endpoint's read marker; call acknowledge to do that.
         """
+        _require_bridge()
         # K1 — reverse-scan tail accessor (NOT list_unread[-1], which is
         # wrong once unread > 100). latest_unread reuses _is_own_write, so
         # it tracks the K7 reconciliation. Does not advance the marker.
@@ -234,11 +387,16 @@ def _build_server(channel: Channel, instance_id: str) -> FastMCP:
         """Return up to `limit` unread peer messages, oldest unread first.
 
         Pagination tool for explicit catch-up. "Unread" means newer than this
-        endpoint's read marker. `since_id` queries from a given id without
-        moving the marker. Default limit 20 guards against context-window
-        bombing; the hard maximum is 100 (higher values are clamped with a
-        warning). The response includes a `has_more` flag for paging.
+        endpoint's read marker. A default catch-up read ADVANCES that marker to
+        the newest item it returns — reading is acknowledging, so the next call
+        continues past this page and nothing re-appears (ADR-058). Pass
+        `since_id` to query history from a given id WITHOUT moving the marker.
+        Default limit 20 guards against context-window bombing; the hard
+        maximum is 100 (higher values are clamped with a warning). The response
+        includes a `has_more` flag — keep calling until it is false to drain
+        the inbox.
         """
+        _require_bridge()
         # K5 — limit type-guard + [1,100] clamp live in list_unread; no
         # redundant guard here. K3 — since_id is an ephemeral read cursor,
         # trusted verbatim (only message_id, which advances the persisted
@@ -257,6 +415,19 @@ def _build_server(channel: Channel, instance_id: str) -> FastMCP:
             for pe in result.parse_errors
         )
         items.sort(key=lambda item: item["id"])
+        # ADR-058 — auto-advance the read marker on a default catch-up read:
+        # reading IS acknowledging. Advance to the newest item returned
+        # (items are id-sorted ascending, so items[-1] is the max), and
+        # because list_unread scans ascending and returns every non-own-write
+        # message up to the cap, everything at-or-before that stem has been
+        # seen — so the next call resumes cleanly past this page (driving
+        # pagination off the marker, no since_id needed). A `since_id` query
+        # is an explicit, non-advancing history read (the same falsy guard
+        # list_unread uses for its bound: None AND "" fall through to the
+        # marker), and check_latest_message stays peek-only. Channel.acknowledge
+        # clamps monotonically, so this never rewinds the marker.
+        if not since_id and items:
+            channel.acknowledge(items[-1]["id"], self_instance_id=instance_id)
         response: dict = {"messages": items, "has_more": result.has_more}
         # Omit "warning" entirely when no clamp fired — don't emit null.
         if result.limit_warning is not None:
@@ -271,6 +442,7 @@ def _build_server(channel: Channel, instance_id: str) -> FastMCP:
         peer's view. Advances the high-water mark to max(current, message_id)
         by filename order, so it is idempotent.
         """
+        _require_bridge()
         # K2 — validate the wire-format of message_id BEFORE advancing the
         # persisted marker. Channel.acknowledge does max(hwm, message_id)
         # lexically; a hallucinated id that sorts above real ids (e.g.
@@ -302,7 +474,13 @@ def _build_server(channel: Channel, instance_id: str) -> FastMCP:
         # channel.path == state_dir/channels/<name>, so channel.path.parent.parent
         # IS the state_dir this channel lives in — enumerating the same world the
         # open channel belongs to, with no second config load or TOCTOU drift.
-        state_dir = channel.path.parent.parent
+        # Dormant (ADR-056): no channel handle, so fall back to the configured
+        # state_dir — enumeration is channel-independent, so a dormant agent can
+        # still discover what channels exist (no _require_bridge gate here).
+        state_dir = (
+            channel.path.parent.parent if channel is not None
+            else load_config().state_dir
+        )
         # K2 — call the aliased free function (a bare `list_channels` would
         # resolve to this closure, not the channel-layer function). Drop
         # ChannelSummary.path — never leak an absolute filesystem path to the
@@ -314,26 +492,39 @@ def _build_server(channel: Channel, instance_id: str) -> FastMCP:
 
     @server.tool()
     def channel_info() -> dict:
-        """Return the current channel's metadata for this endpoint.
+        """Report the agent's letterbox situation — the bridge-state oracle.
 
-        Reports the channel name, this endpoint's sender label, the peer's
-        recipient label, and this endpoint's unread count — all computed
-        server-side so the agent is never trusted to assert its own identity
-        or backlog.
+        Call this BEFORE sending if unsure of the state. It answers, server-side
+        (the agent never asserts its own identity or backlog — §13.3):
+
+        * ``bridged`` — is a channel actually active at all? When ``false`` (a
+          plain session, no bridge), that is the only field, plus a ``detail``
+          telling the agent what a human must do; the messaging tools will
+          error until then.
+        * When ``true``: ``channel`` and ``sender`` (your identity); ``unread``
+          (your unread peer count); ``peer`` (who the peer is, observed from its
+          most recent message — ``null`` if it has never spoken);
+          ``peer_has_spoken``; and ``last_peer_activity`` (when, ISO-8601 — your
+          liveness signal: 90 s ago vs 3 days ago vs never).
         """
+        if channel is None:
+            # Dormant (ADR-056): no active bridge. Honest, actionable state —
+            # not an error — so the agent can relay accurately to the human.
+            return {"bridged": False, "detail": _NOT_BRIDGED_DETAIL}
         # K2 — call the aliased free function (the bare name would resolve to
-        # this closure). All four fields are server-computed (§13.3): identity
-        # from the launcher-resolved channel handle, unread_count from the
-        # filesystem. recipient_label is "" in v1 (peer label unknown at launch
-        # — _open_channel opens with recipient=""); that is the honest answer,
-        # not a bug. Flatten field-by-field (not asdict()) for parity with
-        # _message_to_dict and to stay robust if ChannelInfo grows.
+        # this closure). All values server-computed (§13.3): identity from the
+        # launcher-resolved channel handle; unread/peer from the filesystem.
+        # ``peer`` is the observed peer (sender of the latest peer message) —
+        # more useful than v1's always-"" recipient_label.
         info = _channel_info(channel, self_instance_id=instance_id)
         return {
+            "bridged": True,
             "channel": info.channel,
-            "sender_label": info.sender_label,
-            "recipient_label": info.recipient_label,
-            "unread_count": info.unread_count,
+            "sender": info.sender_label,
+            "unread": info.unread_count,
+            "peer": info.peer_label,
+            "peer_has_spoken": info.peer_label is not None,
+            "last_peer_activity": info.last_peer_activity,
         }
 
     return server

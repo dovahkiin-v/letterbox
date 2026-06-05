@@ -98,6 +98,11 @@ class TestClaudeAdapterConfig:
         assert ClaudeAdapter.notification_template == _VISION_TEMPLATE
         # line_terminator is the inherited base default — NOT overridden.
         assert ClaudeAdapter.line_terminator == b"\r"
+        # Claude wires letterbox via --mcp-config (ADR-054) and submits on a
+        # combined write — no terminator delay (ADR-057). Both base defaults,
+        # set explicitly.
+        assert ClaudeAdapter.mcp_config_via_flag is True
+        assert ClaudeAdapter.terminator_delay == 0.0
 
     def test_registered_under_claude(self) -> None:
         # Module-level @register_adapter fired at import; the live registry

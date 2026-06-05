@@ -1082,12 +1082,27 @@ class ChannelInfo:
             to; K4). NOT capped at 100 — honest count beats capped
             count for the agent's affordances ("47 unread" is
             decision-relevant; "100+ unread" is not).
+        peer_label: The peer's identity as *observed from real traffic* —
+            the ``sender`` of the most recent peer message — or ``None``
+            when the peer has never spoken on this channel (ADR-056). This
+            is the honest answer to "who am I talking to?": ``recipient_label``
+            is unknown at launch (``""`` in v1), but the peer announces
+            itself the moment it writes. Peer-sourced, so informational
+            for the agent (same trust class as ``check_messages`` bodies),
+            never fed into a trusted notification.
+        last_peer_activity: ISO-8601 UTC timestamp of the most recent peer
+            message (from its filename, the server-generated sortable
+            stamp — ADR-027), or ``None`` when the peer has never spoken.
+            The agent's liveness signal: "peer last spoke 90 s ago" reads
+            very differently from "3 days ago" or "never".
     """
 
     channel: str
     sender_label: str
     recipient_label: str
     unread_count: int
+    peer_label: str | None = None
+    last_peer_activity: str | None = None
 
 
 def list_channels(*, state_dir: Path) -> list[ChannelSummary]:
@@ -1210,7 +1225,7 @@ def channel_info(
     own-write filter (:func:`_is_own_write`) + 3b's :func:`read_state`
     into the canonical per-channel metadata query.
 
-    The four returned fields are all sourced server-side:
+    The returned fields are all sourced server-side:
 
     * ``channel`` / ``sender_label`` / ``recipient_label`` come from the
       launcher-resolved :class:`Channel` handle.
@@ -1219,6 +1234,13 @@ def channel_info(
       filtered by ADR-022 (sender half catches cross-restart
       self-recognition; instance half catches the same-harness
       configuration-error case).
+    * ``peer_label`` / ``last_peer_activity`` (ADR-056) are the agent's
+      situational-awareness signals, read from the most recent peer
+      message (a reverse scan that stops at the first non-own-write):
+      who the peer is and when it last spoke, or ``None``/``None`` when
+      the peer has never written. Peer-sourced and informational — the
+      same trust class as ``check_messages`` bodies, never injected into
+      a notification.
 
     Per Vision §6.4 + §13.3 (Join-Key Discipline), the agent NEVER
     asserts identity or unread-count; the server computes both. A
@@ -1306,9 +1328,34 @@ def channel_info(
             continue
         count += 1
 
+    # AX state (ADR-056): the most recent peer message gives the agent two
+    # honest situational signals with no presence mechanism — WHO the peer is
+    # (its sender label, observed from real traffic, not the launch-time
+    # recipient_label which is "" in v1) and WHEN it last spoke. Reverse-scan
+    # from the newest filename and stop at the first peer message: the common
+    # case (a recent peer message) reads one or a few files; it degrades to a
+    # full read only when the peer has NEVER spoken — itself the decision-
+    # relevant "peer absent" signal, on a channel that is small by definition.
+    peer_label: str | None = None
+    last_peer_activity: str | None = None
+    for path in reversed(paths):
+        try:
+            recent = read_message(path)
+        except FileNotFoundError:
+            continue
+        if isinstance(recent, ParseError):
+            continue
+        if _is_own_write(recent, channel.sender_label, self_instance_id):
+            continue
+        peer_label = recent.sender
+        last_peer_activity = _filename_to_iso_timestamp(path.name)
+        break
+
     return ChannelInfo(
         channel=channel.name,
         sender_label=channel.sender_label,
         recipient_label=channel.recipient_label,
         unread_count=count,
+        peer_label=peer_label,
+        last_peer_activity=last_peer_activity,
     )

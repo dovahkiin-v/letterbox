@@ -133,7 +133,9 @@ class LauncherSession:
         handle: The PTY handle for the spawned harness process.
         watcher: The started watcher feeding ``queue``.
         queue: The notification queue the watcher writes and 8b drains.
-        mcp_config_path: Path to the generated temp MCP config (8c deletes it).
+        mcp_config_path: Path to the generated temp MCP config (8c deletes it),
+            or ``None`` when the harness loads its letterbox MCP server from
+            its own settings rather than a ``--mcp-config`` flag (ADR-054).
         notification_template: The config-resolved, validated template 8b renders.
         cwd: The working directory the harness was spawned in.
     """
@@ -147,7 +149,7 @@ class LauncherSession:
     handle: "PTYHandle"
     watcher: Watcher
     queue: "asyncio.Queue[WatcherEvent]"
-    mcp_config_path: Path
+    mcp_config_path: "Path | None"
     notification_template: str
     cwd: Path
 
@@ -274,18 +276,45 @@ async def setup_launcher(
     # not every channel under state_dir — we don't touch channels we didn't open.
     reap_orphan_tmp(channel.path)
 
-    # ── Generate MCP config, then spawn + start the watcher (rollback-guarded). ──
-    mcp_config_path = generate_mcp_config(
-        harness_name, channel_name, sender_label, instance_id
-    )
+    # ── Generate the MCP config (flag-wired harnesses only), then spawn +
+    #    start the watcher (rollback-guarded). A harness whose CLI has no
+    #    ``--mcp-config`` flag (Gemini, Antigravity — ADR-054) loads its
+    #    letterbox MCP server from its own settings, so the launcher generates
+    #    no temp file and injects no flag for it. ──
+    mcp_config_path: "Path | None" = None
+    if adapter.mcp_config_via_flag:
+        mcp_config_path = generate_mcp_config(
+            harness_name, channel_name, sender_label, instance_id
+        )
 
     handle: "PTYHandle | None" = None
     try:
         # The spawn env is fully specified (not merged by the adapter — 5a K6).
-        # LETTERBOX_HOME is the W18 join key pinning the MCP child to this state_dir.
-        spawn_env = {**os.environ, "LETTERBOX_HOME": str(state_dir)}
-        # Mandatory --mcp-config first (predictable position), user passthrough after.
-        launch_extra_args = ["--mcp-config", str(mcp_config_path), *(extra_args or [])]
+        # LETTERBOX_HOME is the W18 join key pinning the MCP child to this
+        # state_dir. The CHANNEL / SENDER / INSTANCE_ID vars are the runtime
+        # join keys a settings-wired harness (no --mcp-config flag) reads via
+        # _parse_args's env fallback — the same mechanism the Forge tower
+        # orchestrator uses for FORGE_DIALOGUE_CHANNEL (ADR-055). They are
+        # harmless for a flag-wired harness (Claude): the explicit --mcp-config
+        # flags take precedence over the env in the MCP child's _parse_args.
+        spawn_env = {
+            **os.environ,
+            "LETTERBOX_HOME": str(state_dir),
+            "LETTERBOX_CHANNEL": channel_name,
+            "LETTERBOX_SENDER": sender_label,
+            "LETTERBOX_INSTANCE_ID": instance_id,
+        }
+        # Mandatory --mcp-config first (predictable position), user passthrough
+        # after — but only for flag-wired harnesses (ADR-054). Others pass
+        # through just the user's extra_args; their tools come from settings.
+        if mcp_config_path is not None:
+            launch_extra_args = [
+                "--mcp-config",
+                str(mcp_config_path),
+                *(extra_args or []),
+            ]
+        else:
+            launch_extra_args = list(extra_args or [])
         handle = await adapter.spawn(launch_extra_args, cwd, spawn_env)
 
         queue: "asyncio.Queue[WatcherEvent]" = asyncio.Queue()
@@ -300,7 +329,8 @@ async def setup_launcher(
         # Assembly rollback (K5 / L6): no leaked PTY child, no orphaned temp file.
         if handle is not None:
             await adapter.teardown(handle)
-        cleanup_mcp_config(mcp_config_path)
+        if mcp_config_path is not None:
+            cleanup_mcp_config(mcp_config_path)
         raise
 
     return LauncherSession(
@@ -442,8 +472,10 @@ async def _teardown_runtime(
        task becomes a ``RuntimeWarning`` → test failure). A settled non-cancel
        exception is logged, never allowed to skip cleanup.
     2. **Stop the watcher**, then **teardown the harness tree**, then **delete
-       the temp MCP config** — wrapped in nested ``finally`` so each
-       resource-critical step runs even if an earlier one raises. The harness
+       the temp MCP config** (skipped when ``mcp_config_path`` is ``None`` —
+       a settings-wired harness generated no temp file, ADR-054) — wrapped in
+       nested ``finally`` so each resource-critical step runs even if an
+       earlier one raises. The harness
        teardown reaps the whole process group including the MCP child via
        ``killpg`` (T10), so there is no separate MCP-child reaping. All three
        are individually idempotent (a second call is a clean no-op).
@@ -478,7 +510,8 @@ async def _teardown_runtime(
                 session.handle, timeout=teardown_timeout
             )
         finally:
-            cleanup_mcp_config(session.mcp_config_path)
+            if session.mcp_config_path is not None:
+                cleanup_mcp_config(session.mcp_config_path)
 
 
 def _resolve_user_fd(explicit: int | None, stream: object) -> int | None:

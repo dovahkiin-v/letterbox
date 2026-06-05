@@ -140,6 +140,26 @@ class Adapter(ABC):
     # different terminator. Bytes, not str, because 5a's inject_to_pty takes
     # bytes — appending an already-encoded literal is one op (G9).
     line_terminator: ClassVar[bytes] = b"\r"
+    # Whether this harness loads its letterbox MCP server from a per-launch
+    # ``--mcp-config <path>`` flag the launcher generates (Claude), or from its
+    # own persistent settings (Gemini/Antigravity — neither CLI has such a
+    # flag; passing one makes them abort with "Unknown arguments"). When
+    # ``False``, the launcher generates NO temp MCP config and injects NO
+    # flag: the harness's letterbox tools come from its user-level settings
+    # (e.g. ``~/.gemini/settings.json``), exactly as the Forge orchestrators
+    # wired them. See ADR-054.
+    mcp_config_via_flag: ClassVar[bool] = True
+    # Seconds to wait between writing the message text and writing the line
+    # terminator. ``0.0`` (default) appends the terminator to the text in one
+    # write — what Claude Code is proven against. A positive value writes the
+    # terminator as a SEPARATE, delayed write, because some harness TUIs gate
+    # submission on timing: Gemini's KeypressContext rewrites an Enter arriving
+    # within ``FAST_RETURN_TIMEOUT`` (30 ms) of the previous key into shift+Enter
+    # — "a newline, not a submission" (its own comment). A back-to-back ``\r``
+    # therefore lands in the input box without submitting; a ``\r`` delayed past
+    # 30 ms is seen as a real Enter. (The Forge tower orchestrator clears this
+    # for free via pexpect's default 50 ms ``delaybeforesend``.) ADR-057.
+    terminator_delay: ClassVar[float] = 0.0
 
     def __new__(cls, *args: object, **kwargs: object) -> "Adapter":
         if cls is Adapter:
@@ -193,9 +213,13 @@ class Adapter(ABC):
         """Write ``message`` plus the line terminator to the PTY master fd.
 
         Passes ``message`` through :meth:`pre_inject` (identity by default),
-        encodes the result as UTF-8 (Vision §11.1), appends
-        ``line_terminator`` (ADR-018 — the agent never wakes without it),
-        then writes via 5a's ``inject_to_pty`` on a worker thread.
+        encodes the result as UTF-8 (Vision §11.1), and writes it plus
+        ``line_terminator`` (ADR-018 — the agent never wakes without it) via
+        5a's ``inject_to_pty`` on a worker thread. When ``terminator_delay`` is
+        positive (Gemini, Antigravity — ADR-057), the terminator is a SECOND
+        write issued after that delay, so the harness TUI registers a discrete
+        Enter (a submit) rather than a fast-return newline; otherwise (Claude)
+        it rides one combined write.
 
         Args:
             handle: The handle returned by :meth:`spawn`.
@@ -217,8 +241,21 @@ class Adapter(ABC):
                 f"got {type(message).__name__}"
             )
         transformed = self.pre_inject(message)
-        payload = transformed.encode("utf-8") + self.line_terminator
-        await asyncio.to_thread(inject_to_pty, handle.master_fd, payload)
+        encoded = transformed.encode("utf-8")
+        if self.terminator_delay > 0:
+            # ADR-057: write the text, wait past the harness's fast-return
+            # window (Gemini's 30 ms), THEN write the terminator so it registers
+            # as a discrete Enter (a submit), not a fast-return newline. The
+            # terminator is well under PIPE_BUF, so the writes cannot tear.
+            await asyncio.to_thread(inject_to_pty, handle.master_fd, encoded)
+            await asyncio.sleep(self.terminator_delay)
+            await asyncio.to_thread(
+                inject_to_pty, handle.master_fd, self.line_terminator
+            )
+        else:
+            await asyncio.to_thread(
+                inject_to_pty, handle.master_fd, encoded + self.line_terminator
+            )
 
     async def teardown(
         self, handle: PTYHandle, *, timeout: float = _DEFAULT_TEARDOWN_TIMEOUT_SECONDS
@@ -288,8 +325,9 @@ def register_adapter(adapter_cls: type[Adapter]) -> type[Adapter]:
     Raises:
         AdapterConfigurationError: If ``name``/``command``/
             ``notification_template`` are not non-empty strings,
-            ``default_args`` is not ``list[str]`` (may be empty), or
-            ``line_terminator`` is not non-empty bytes.
+            ``default_args`` is not ``list[str]`` (may be empty),
+            ``line_terminator`` is not non-empty bytes, or
+            ``mcp_config_via_flag`` is not a ``bool``.
         AdapterAlreadyRegistered: If ``name`` is already in the registry.
     """
     name = adapter_cls.name
@@ -319,6 +357,18 @@ def register_adapter(adapter_cls: type[Adapter]) -> type[Adapter]:
     if not isinstance(terminator, bytes) or not terminator:
         raise AdapterConfigurationError(
             _config_error(adapter_cls, "line_terminator", "non-empty bytes", terminator)
+        )
+    flag = adapter_cls.mcp_config_via_flag
+    if not isinstance(flag, bool):
+        raise AdapterConfigurationError(
+            _config_error(adapter_cls, "mcp_config_via_flag", "a bool", flag)
+        )
+    delay = adapter_cls.terminator_delay
+    if isinstance(delay, bool) or not isinstance(delay, (int, float)) or delay < 0:
+        raise AdapterConfigurationError(
+            _config_error(
+                adapter_cls, "terminator_delay", "a non-negative number", delay
+            )
         )
 
     if name in _REGISTRY:

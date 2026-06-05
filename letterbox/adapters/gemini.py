@@ -38,3 +38,16 @@ class GeminiAdapter(Adapter):
         "📬 Peer message on channel {channel}. Use check_messages."
     )
     # line_terminator inherits the base default b"\r" (ADR-018) — no override.
+    # The Gemini CLI has NO ``--mcp-config`` flag (it aborts with "Unknown
+    # arguments: mcp-config" — verified against gemini-cli 0.45.0). Its MCP
+    # servers come from settings (``~/.gemini/settings.json`` user-level, or a
+    # workspace ``.gemini/settings.json``). So letterbox does NOT inject the
+    # flag; the user configures a ``letterbox`` MCP server there once, exactly
+    # as the Forge tower orchestrator does. ADR-054.
+    mcp_config_via_flag = False
+    # Gemini's KeypressContext rewrites an Enter arriving within 30 ms of the
+    # previous key into a newline ("FAST_RETURN_TIMEOUT"), so a back-to-back
+    # CR lands in the box without submitting (observed live). Delaying the CR
+    # past that window makes it a real Enter. 100 ms is a comfortable margin
+    # and imperceptible. ADR-057.
+    terminator_delay = 0.1

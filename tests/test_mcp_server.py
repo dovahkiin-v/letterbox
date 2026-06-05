@@ -19,6 +19,7 @@ import asyncio
 import inspect
 import json
 import os
+import pty
 import shutil
 import signal
 import subprocess
@@ -30,7 +31,14 @@ import pytest
 
 from letterbox import mcp_server
 from letterbox.channel import Channel, read_state
-from letterbox.mcp_server import _build_server, _open_channel, _parse_args, run
+from letterbox.mcp_server import (
+    _align_read_marker,
+    _build_server,
+    _missing_join_keys,
+    _open_channel,
+    _parse_args,
+    run,
+)
 from letterbox.protocol import (
     MAX_BODY_BYTES,
     Message,
@@ -209,24 +217,57 @@ class TestParseArgs:
         assert excinfo.value.code == 2
 
     @pytest.mark.parametrize(
-        ("argv", "missing_flag"),
+        ("argv", "missing_attr", "missing_spec"),
         [
-            (["--as", "claude", "--instance-id", "lb-x"], "--channel"),
-            (["--channel", "c", "--instance-id", "lb-x"], "--as"),
-            (["--channel", "c", "--as", "claude"], "--instance-id"),
+            (["--as", "claude", "--instance-id", "lb-x"], "channel",
+             "--channel / $LETTERBOX_CHANNEL"),
+            (["--channel", "c", "--instance-id", "lb-x"], "sender_label",
+             "--as / $LETTERBOX_SENDER"),
+            (["--channel", "c", "--as", "claude"], "instance_id",
+             "--instance-id / $LETTERBOX_INSTANCE_ID"),
         ],
     )
-    def test_missing_required_flag_rejected(
+    def test_missing_value_resolves_to_none(
         self,
         argv: list[str],
-        missing_flag: str,
-        capsys: pytest.CaptureFixture[str],
+        missing_attr: str,
+        missing_spec: str,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        with pytest.raises(SystemExit) as excinfo:
-            _parse_args(argv)
-        assert excinfo.value.code == 2
-        # Framework P3 — the error names the missing flag (a vector, not a wall).
-        assert missing_flag in capsys.readouterr().err
+        # ADR-056: _parse_args is LENIENT — a join key absent from both flags
+        # and env resolves to None (run() decides dormant-vs-error), it does NOT
+        # exit. _missing_join_keys names it as a "flag / $ENV" vector (P3).
+        for var in (
+            "LETTERBOX_CHANNEL", "LETTERBOX_SENDER", "LETTERBOX_INSTANCE_ID"
+        ):
+            monkeypatch.delenv(var, raising=False)
+        ns = _parse_args(argv)
+        assert getattr(ns, missing_attr) is None
+        assert _missing_join_keys(ns) == [missing_spec]
+
+    @pytest.mark.parametrize(
+        ("envvar", "attr"),
+        [
+            ("LETTERBOX_CHANNEL", "channel"),
+            ("LETTERBOX_SENDER", "sender_label"),
+            ("LETTERBOX_INSTANCE_ID", "instance_id"),
+        ],
+    )
+    def test_env_fallback_supplies_missing_value(
+        self, envvar: str, attr: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ADR-055: a value absent as a flag is taken from its env var, so a
+        # settings-wired harness (channel-agnostic ["mcp"]) gets the per-launch
+        # join keys the launcher exported.
+        monkeypatch.setenv(envvar, "from-env")
+        ns = _parse_args([])  # no flags at all
+        assert getattr(ns, attr) == "from-env"
+
+    def test_flag_wins_over_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An explicit flag is the stronger signal and overrides the env (ADR-055).
+        monkeypatch.setenv("LETTERBOX_CHANNEL", "env-chan")
+        ns = _parse_args(["--channel", "flag-chan"])
+        assert ns.channel == "flag-chan"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -319,6 +360,79 @@ class TestOpenChannel:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# TestAlignReadMarker — launch watermark = read marker (ADR-058 fix a)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestAlignReadMarker:
+    def test_advances_marker_to_latest_message_at_launch(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        # ADR-058 — at launch the read marker jumps to the newest message on
+        # disk, so the inbox starts as "messages since I launched" (matching
+        # the watcher's start watermark, ADR-024) rather than the whole backlog.
+        ch = Channel.get_or_create("review", "claude", "", state_dir=tmp_letterbox_home)
+        base = datetime(2026, 5, 27, 14, 0, 0, 0, tzinfo=timezone.utc)
+        stems = [
+            _write_peer_message(ch, body=f"m{i}", timestamp=base + timedelta(microseconds=i))
+            for i in range(3)
+        ]
+        _align_read_marker(ch, "lb-launch")
+        assert read_state(ch, ch.sender_label).high_water_mark == stems[-1]
+
+    def test_kills_cross_session_backlog(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        # The headline fix: a stale message from a prior session is treated as
+        # read after launch alignment, so check_messages does not replay it.
+        ch = Channel.get_or_create("review", "claude", "", state_dir=tmp_letterbox_home)
+        _write_peer_message(ch, body="stale from last session")
+        _align_read_marker(ch, "lb-launch")
+        _, server = ch, _build_server(ch, "lb-launch")
+        assert _fn(server, "check_messages")()["messages"] == []
+
+    def test_uses_latest_including_own_writes(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        # The watermark is the newest filename regardless of sender — own
+        # writes are filtered downstream, so it simply means "up to launch is
+        # not new". A newest-own-write must still advance the marker past the
+        # earlier peer message.
+        ch = Channel.get_or_create("review", "claude", "", state_dir=tmp_letterbox_home)
+        base = datetime(2026, 5, 27, 14, 0, 0, 0, tzinfo=timezone.utc)
+        _write_peer_message(ch, sender="gemini", body="peer", timestamp=base)
+        own_stem = _write_peer_message(
+            ch, sender="claude", instance_id="lb-mine", body="mine",
+            timestamp=base + timedelta(microseconds=1),
+        )
+        _align_read_marker(ch, "lb-launch")
+        assert read_state(ch, ch.sender_label).high_water_mark == own_stem
+
+    def test_empty_channel_is_noop(self, tmp_letterbox_home: Path) -> None:
+        # No messages → nothing to acknowledge → no .read/ file written.
+        ch = Channel.get_or_create("review", "claude", "", state_dir=tmp_letterbox_home)
+        _align_read_marker(ch, "lb-launch")
+        assert read_state(ch, ch.sender_label).high_water_mark == ""
+        assert not (ch.path / ".read").exists()
+
+    def test_monotonic_never_rewinds(self, tmp_letterbox_home: Path) -> None:
+        # A prior session may have advanced the marker past the current latest
+        # (e.g. via a since_id catch-up that acknowledged ahead); relaunch must
+        # not rewind it. The clamp is max(current, latest).
+        ch = Channel.get_or_create("review", "claude", "", state_dir=tmp_letterbox_home)
+        base = datetime(2026, 5, 27, 14, 0, 0, 0, tzinfo=timezone.utc)
+        stem = _write_peer_message(ch, body="m0", timestamp=base)
+        ahead = make_message_filename(
+            base + timedelta(microseconds=5)
+        ).removesuffix(".json")
+        ch.acknowledge(ahead, self_instance_id="lb-prev")
+        _align_read_marker(ch, "lb-launch")
+        # latest-on-disk (stem) < already-acknowledged (ahead) → no rewind.
+        assert read_state(ch, ch.sender_label).high_water_mark == ahead
+        assert stem < ahead
+
+
+# ──────────────────────────────────────────────────────────────────────
 # TestRun — in-process orchestration coverage (no blocking stdio loop)
 # ──────────────────────────────────────────────────────────────────────
 
@@ -339,6 +453,18 @@ class TestRun:
         run(["--channel", "test", "--as", "claude", "--instance-id", "lb-x"])
         assert transports == ["stdio"]
         assert (tmp_letterbox_home / "channels" / "test").is_dir()
+
+    def test_aligns_read_marker_at_launch(
+        self, tmp_letterbox_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ADR-058 — run() aligns the marker between opening the channel and
+        # starting the server. Pre-seed a message on the channel run() will
+        # open, then prove the marker landed on it after run() returns.
+        ch = Channel.get_or_create("test", "claude", "", state_dir=tmp_letterbox_home)
+        stem = _write_peer_message(ch, body="pre-launch")
+        monkeypatch.setattr(FastMCP, "run", lambda self, transport="stdio": None)
+        run(["--channel", "test", "--as", "claude", "--instance-id", "lb-x"])
+        assert read_state(ch, ch.sender_label).high_water_mark == stem
 
     def test_argv_none_reads_sys_argv(
         self, tmp_letterbox_home: Path, monkeypatch: pytest.MonkeyPatch
@@ -390,20 +516,67 @@ class TestRunShutdown:
             proc.send_signal(signal.SIGTERM)
             _ensure_dead(proc)
 
-    def test_missing_required_arg_exits_nonzero(
-        self, tmp_letterbox_home: Path
-    ) -> None:
-        # The subprocess view of the missing-arg lock: argparse exits 2 before
-        # any channel is opened. stdin closed (DEVNULL-equivalent) — no serve
-        # loop to keep alive.
-        proc = _spawn_server(
-            tmp_letterbox_home,
-            extra_args=["--channel", "c", "--as", "claude"],  # no --instance-id
+    @staticmethod
+    def _env_without_join_keys(home: Path) -> dict[str, str]:
+        """A subprocess env with LETTERBOX_HOME but NO channel/sender/instance
+        join keys — so a missing flag is genuinely missing from both sources."""
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k
+            not in (
+                "LETTERBOX_CHANNEL",
+                "LETTERBOX_SENDER",
+                "LETTERBOX_INSTANCE_ID",
+            )
+        }
+        env["LETTERBOX_HOME"] = str(home)
+        return env
+
+    def test_missing_arg_tty_exits_loud(self, tmp_letterbox_home: Path) -> None:
+        # Human-misuse path (ADR-056): a person runs `letterbox mcp` by hand
+        # with an incomplete invocation. stdin is a TTY → fail loud, exit 2,
+        # name the missing key — not a dormant hang on a handshake that never
+        # arrives.
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _RUN_PROG, "--channel", "c", "--as", "claude"],
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self._env_without_join_keys(tmp_letterbox_home),
         )
+        os.close(slave)
         try:
             _out, err = proc.communicate(timeout=10.0)
             assert proc.returncode == 2
             assert b"--instance-id" in err
+        finally:
+            os.close(master)
+            _ensure_dead(proc)
+
+    def test_missing_arg_pipe_starts_dormant(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        # Host-spawn path (ADR-056): an MCP host spawns `letterbox mcp` over a
+        # pipe (non-TTY) with no channel (e.g. the server left in user-level
+        # settings, a plain session). It must NOT exit — it starts DORMANT and
+        # blocks in the serve loop so the harness shows a calm "connected".
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _RUN_PROG, "--channel", "c", "--as", "claude"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self._env_without_join_keys(tmp_letterbox_home),
+        )
+        try:
+            # wait() (NOT communicate(), which would CLOSE stdin and give the
+            # server a clean EOF exit) blocks until the process exits. A dormant
+            # server stays in its serve loop while stdin is open, so wait times
+            # out → it did not exit 2, it went dormant.
+            with pytest.raises(subprocess.TimeoutExpired):
+                proc.wait(timeout=1.5)
+            assert proc.poll() is None
         finally:
             _ensure_dead(proc)
 
@@ -814,11 +987,73 @@ class TestCheckMessages:
         assert "parse_error" not in items[0]
         assert "parse_error" not in items[2]
 
-    def test_read_only_creates_no_read_state_file(
+    def test_default_read_advances_marker_to_newest_returned(
         self, tmp_letterbox_home: Path
     ) -> None:
+        # ADR-058 — a default (no since_id) catch-up read IS an acknowledge:
+        # the persisted marker advances to the newest item returned, and the
+        # .read/ file is now created (the inverse of the old read-only contract).
         ch, server = _real_channel_and_server(tmp_letterbox_home)
-        self._seed(ch, 2)
+        stems = self._seed(ch, 3)
+        _fn(server, "check_messages")()
+        assert read_state(ch, ch.sender_label).high_water_mark == stems[-1]
+        assert (ch.path / ".read").exists()
+
+    def test_default_read_drains_inbox_on_repeat(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        # The headline ADR-058 behavior: reading clears the inbox, so a second
+        # call with no new arrivals returns nothing and leaves the marker put.
+        ch, server = _real_channel_and_server(tmp_letterbox_home)
+        stems = self._seed(ch, 3)
+        first = _fn(server, "check_messages")()
+        assert [item["id"] for item in first["messages"]] == stems
+        second = _fn(server, "check_messages")()
+        assert second == {"messages": [], "has_more": False}
+        # Marker unchanged by the empty second read (nothing to advance to).
+        assert read_state(ch, ch.sender_label).high_water_mark == stems[-1]
+
+    def test_marker_drives_pagination_without_since_id(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        # ADR-058 — because each default read advances the marker, successive
+        # calls page through the backlog with no since_id threading: drain by
+        # calling until has_more is false.
+        ch, server = _real_channel_and_server(tmp_letterbox_home)
+        stems = self._seed(ch, 25)
+        first = _fn(server, "check_messages")()
+        assert [item["id"] for item in first["messages"]] == stems[:20]
+        assert first["has_more"] is True
+        assert read_state(ch, ch.sender_label).high_water_mark == stems[19]
+        second = _fn(server, "check_messages")()
+        assert [item["id"] for item in second["messages"]] == stems[20:]
+        assert second["has_more"] is False
+        assert read_state(ch, ch.sender_label).high_water_mark == stems[-1]
+
+    def test_advance_includes_parse_error_items(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        # A parse-error envelope consumes an inbox slot and is surfaced in the
+        # response, so the marker must advance past it too — otherwise a
+        # malformed file would re-appear on every read forever.
+        ch, server = _real_channel_and_server(tmp_letterbox_home)
+        base = datetime(2026, 5, 27, 14, 0, 0, 0, tzinfo=timezone.utc)
+        _write_peer_message(ch, body="clean", timestamp=base)
+        bad_name = make_message_filename(base + timedelta(microseconds=1))
+        bad_stem = bad_name.removesuffix(".json")
+        (ch.path / bad_name).write_bytes(b"{not valid json")
+        _fn(server, "check_messages")()
+        # Marker advanced to the newest returned item (the parse error).
+        assert read_state(ch, ch.sender_label).high_water_mark == bad_stem
+        # And the malformed file does not re-surface on the next read.
+        assert _fn(server, "check_messages")()["messages"] == []
+
+    def test_empty_default_read_creates_no_read_state_file(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        # No unread items → nothing to acknowledge → no marker write, so an
+        # empty channel still touches no .read/ file (the advance is guarded).
+        ch, server = _real_channel_and_server(tmp_letterbox_home)
         _fn(server, "check_messages")()
         assert not (ch.path / ".read").exists()
 
@@ -1023,21 +1258,37 @@ class TestListChannels:
 
 
 class TestChannelInfo:
-    def test_shape_and_identity_recipient_empty(
+    def test_shape_and_identity_bridged(
         self, tmp_letterbox_home: Path
     ) -> None:
-        # Exactly the four §6.1 keys; identity from the channel handle.
-        # recipient_label is "" in v1 — the launcher opens with recipient=""
-        # (peer label unknown at launch). Assert "", do NOT "fix" it.
+        # The bridged state-oracle shape (ADR-056): bridged True, identity from
+        # the channel handle, and — with no peer message yet — peer None /
+        # peer_has_spoken False / last_peer_activity None (the honest "peer has
+        # never spoken" answer, more useful than v1's always-"" recipient_label).
         _ch, server = _real_channel_and_server(
             tmp_letterbox_home, channel="review", label="claude"
         )
         assert _fn(server, "channel_info")() == {
+            "bridged": True,
             "channel": "review",
-            "sender_label": "claude",
-            "recipient_label": "",
-            "unread_count": 0,
+            "sender": "claude",
+            "unread": 0,
+            "peer": None,
+            "peer_has_spoken": False,
+            "last_peer_activity": None,
         }
+
+    def test_peer_observed_from_traffic(self, tmp_letterbox_home: Path) -> None:
+        # ADR-056: once the peer writes, channel_info reports WHO it is (sender
+        # of the latest peer message) and that it has spoken, with a timestamp.
+        ch, server = _real_channel_and_server(
+            tmp_letterbox_home, channel="review", label="claude"
+        )
+        _write_peer_message(ch, sender="gemini", body="hello")
+        info = _fn(server, "channel_info")()
+        assert info["peer"] == "gemini"
+        assert info["peer_has_spoken"] is True
+        assert info["last_peer_activity"] is not None
 
     def test_unread_count_reflects_peer_messages(
         self, tmp_letterbox_home: Path
@@ -1050,10 +1301,10 @@ class TestChannelInfo:
             )
             for i in range(3)
         ]
-        assert _fn(server, "channel_info")()["unread_count"] == 3
+        assert _fn(server, "channel_info")()["unread"] == 3
         # Acknowledging the newest advances the marker past all three.
         _fn(server, "acknowledge")(message_id=stems[-1])
-        assert _fn(server, "channel_info")()["unread_count"] == 0
+        assert _fn(server, "channel_info")()["unread"] == 0
 
     def test_own_writes_excluded(self, tmp_letterbox_home: Path) -> None:
         # A send_message write is own-write from this endpoint's view
@@ -1061,7 +1312,7 @@ class TestChannelInfo:
         # closure instance_id) → not counted.
         _ch, server = _real_channel_and_server(tmp_letterbox_home)
         _fn(server, "send_message")(body="mine")
-        assert _fn(server, "channel_info")()["unread_count"] == 0
+        assert _fn(server, "channel_info")()["unread"] == 0
 
     def test_parse_error_counted(self, tmp_letterbox_home: Path) -> None:
         # A malformed file with a VALID msg-*.json name (garbage content)
@@ -1070,7 +1321,7 @@ class TestChannelInfo:
         ch, server = _real_channel_and_server(tmp_letterbox_home)
         base = datetime(2026, 5, 27, 14, 0, 0, 0, tzinfo=timezone.utc)
         (ch.path / make_message_filename(base)).write_bytes(b"{not valid json")
-        assert _fn(server, "channel_info")()["unread_count"] == 1
+        assert _fn(server, "channel_info")()["unread"] == 1
 
     def test_true_count_not_capped_at_100(self, tmp_letterbox_home: Path) -> None:
         # 3d K4 honest-count contract — the count is the true figure, NOT
@@ -1081,7 +1332,58 @@ class TestChannelInfo:
             _write_peer_message(
                 ch, body=f"m{i}", timestamp=base + timedelta(microseconds=i)
             )
-        assert _fn(server, "channel_info")()["unread_count"] == 101
+        assert _fn(server, "channel_info")()["unread"] == 101
+
+
+class TestDormantServer:
+    """ADR-056: a server built with ``channel=None`` connects but is bridge-less.
+
+    The calm-surface contract: same six tools, same schemas (so a plain session
+    shows "connected", not "disconnected"), but ``channel_info`` is honest about
+    the absent bridge and the four messaging tools fail loud the moment they are
+    actually used — so a misconfigured bridge surfaces, a deliberate plain
+    session stays quiet.
+    """
+
+    def test_registers_all_six_tools_even_dormant(self) -> None:
+        server = _build_server(None, None)
+        tools = asyncio.run(server.list_tools())
+        assert {t.name for t in tools} == _EXPECTED_TOOLS
+
+    def test_channel_info_reports_not_bridged(self) -> None:
+        info = _fn(_build_server(None, None), "channel_info")()
+        assert info["bridged"] is False
+        assert "detail" in info
+        # Actionable, agent-facing: it names what a human must do.
+        assert "letterbox" in info["detail"]
+
+    @pytest.mark.parametrize(
+        ("tool", "kwargs"),
+        [
+            ("send_message", {"body": "x"}),
+            ("check_latest_message", {}),
+            ("check_messages", {}),
+            ("acknowledge", {"message_id": "msg-x"}),
+        ],
+    )
+    def test_messaging_tools_fail_loud(
+        self, tool: str, kwargs: dict[str, object]
+    ) -> None:
+        # Never silently dark (Vision §7.1): the four messaging tools raise a
+        # clear "no active bridge" error rather than no-op or hang. acknowledge's
+        # bridge guard precedes its message_id format check.
+        server = _build_server(None, None)
+        with pytest.raises(RuntimeError, match="no active bridge"):
+            _fn(server, tool)(**kwargs)
+
+    def test_list_channels_works_dormant(
+        self, tmp_letterbox_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # list_channels is filesystem enumeration, not a per-channel op — a
+        # dormant agent can still discover what channels exist (no bridge gate).
+        monkeypatch.setenv("LETTERBOX_HOME", str(tmp_letterbox_home))
+        result = _fn(_build_server(None, None), "list_channels")()
+        assert isinstance(result, list)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1121,15 +1423,19 @@ class TestMcpIntegration:
                     e["name"] == "review" for e in lc.structuredContent["result"]
                 )
 
-                # channel_info: plain dict → JSON in content[0].text.
+                # channel_info: plain dict → JSON in content[0].text. The
+                # bridged state-oracle shape (ADR-056); the peer message above
+                # makes peer observable as "gemini".
                 ci = await session.call_tool("channel_info", {})
                 assert ci.isError is False
-                assert json.loads(ci.content[0].text) == {
-                    "channel": "review",
-                    "sender_label": "claude",
-                    "recipient_label": "",
-                    "unread_count": 1,
-                }
+                ci_payload = json.loads(ci.content[0].text)
+                assert ci_payload["bridged"] is True
+                assert ci_payload["channel"] == "review"
+                assert ci_payload["sender"] == "claude"
+                assert ci_payload["unread"] == 1
+                assert ci_payload["peer"] == "gemini"
+                assert ci_payload["peer_has_spoken"] is True
+                assert ci_payload["last_peer_activity"] is not None
 
                 # check_latest_message: dict|None → structuredContent {"result": ...}.
                 clm = await session.call_tool("check_latest_message", {})
@@ -1209,6 +1515,13 @@ class TestMcpIntegration:
 
         async def _go() -> None:
             async with create_connected_server_and_client_session(server) as session:
+                # channel_info is a peek (non-advancing), so count the unread
+                # parse-error slot BEFORE the catch-up read consumes it:
+                # check_messages now advances the marker past it (ADR-058).
+                ci = await session.call_tool("channel_info", {})
+                assert ci.isError is False
+                assert json.loads(ci.content[0].text)["unread"] == 1
+
                 cm = await session.call_tool("check_messages", {})
                 assert cm.isError is False
                 items = json.loads(cm.content[0].text)["messages"]
@@ -1216,10 +1529,6 @@ class TestMcpIntegration:
                 assert items[0]["id"] == bad_stem
                 assert "parse_error" in items[0]
                 assert items[0]["body"] is None
-
-                ci = await session.call_tool("channel_info", {})
-                assert ci.isError is False
-                assert json.loads(ci.content[0].text)["unread_count"] == 1
 
         asyncio.run(_go())
 

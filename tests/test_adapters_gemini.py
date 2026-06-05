@@ -99,6 +99,11 @@ class TestGeminiAdapterConfig:
         assert GeminiAdapter.notification_template == _VISION_TEMPLATE
         # line_terminator is the inherited base default — NOT overridden.
         assert GeminiAdapter.line_terminator == b"\r"
+        # Gemini loads letterbox from its own settings (no --mcp-config flag,
+        # ADR-054) and needs the terminator delayed past its fast-return window
+        # to submit (ADR-057) — both overrides of the base defaults.
+        assert GeminiAdapter.mcp_config_via_flag is False
+        assert GeminiAdapter.terminator_delay == 0.1
 
     def test_registered_under_gemini(self) -> None:
         # Module-level @register_adapter fired at import; the live registry

@@ -40,3 +40,12 @@ class AntigravityAdapter(Adapter):
         "📬 Peer message on channel {channel}. Use check_messages."
     )
     # line_terminator inherits the base default b"\r" (ADR-018) — no override.
+    # The Antigravity CLI (``agy``) has NO ``--mcp-config`` flag either — it
+    # manages tools via ``agy plugin`` subcommands (verified against agy
+    # 1.0.5). Like Gemini, its letterbox MCP server is configured in the
+    # harness's own settings, not injected per launch. ADR-054.
+    mcp_config_via_flag = False
+    # Antigravity (``agy``) is a TUI in the Gemini family; assume it shares the
+    # fast-return submission gate and delay the terminator like Gemini, until a
+    # live ``agy`` run says otherwise. ADR-057.
+    terminator_delay = 0.1

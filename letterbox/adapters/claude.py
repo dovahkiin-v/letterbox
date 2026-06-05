@@ -39,3 +39,10 @@ class ClaudeAdapter(Adapter):
         "📬 Peer message on channel {channel}. Call check_messages to read."
     )
     # line_terminator inherits the base default b"\r" (ADR-018) — no override.
+    # Claude Code supports ``--mcp-config <path>``, so letterbox wires its MCP
+    # server self-contained per launch (the base default). ADR-054.
+    mcp_config_via_flag = True
+    # Claude Code submits on a combined ``b"text\r"`` write (verified live), so
+    # it keeps the single-write path (no terminator delay) — the base default.
+    # ADR-057.
+    terminator_delay = 0.0

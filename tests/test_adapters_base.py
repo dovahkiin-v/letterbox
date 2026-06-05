@@ -288,6 +288,31 @@ class TestRegisterAdapter:
         with pytest.raises(AdapterConfigurationError, match="line_terminator"):
             register_adapter(_make_cls(line_terminator=b""))
 
+    def test_register_rejects_non_bool_mcp_config_via_flag(
+        self, reset_registry: dict[str, type[Adapter]]
+    ) -> None:
+        with pytest.raises(
+            AdapterConfigurationError, match="mcp_config_via_flag"
+        ):
+            register_adapter(_make_cls(mcp_config_via_flag="yes"))
+
+    def test_register_rejects_negative_terminator_delay(
+        self, reset_registry: dict[str, type[Adapter]]
+    ) -> None:
+        with pytest.raises(
+            AdapterConfigurationError, match="terminator_delay"
+        ):
+            register_adapter(_make_cls(terminator_delay=-0.5))
+
+    def test_register_rejects_non_number_terminator_delay(
+        self, reset_registry: dict[str, type[Adapter]]
+    ) -> None:
+        # bool is rejected too (True/False are ints but nonsensical as a delay).
+        with pytest.raises(
+            AdapterConfigurationError, match="terminator_delay"
+        ):
+            register_adapter(_make_cls(terminator_delay=True))
+
     def test_register_accepts_empty_default_args(
         self, reset_registry: dict[str, type[Adapter]]
     ) -> None:
@@ -553,6 +578,45 @@ class TestInject:
         finally:
             await adapter.teardown(handle, timeout=_FAST_TEARDOWN)
         assert fake_harness.read_echo() == b"x\n"
+
+    @pytest.mark.asyncio
+    async def test_inject_combined_write_when_no_delay(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ADR-057: terminator_delay == 0 → text + terminator in ONE os.write.
+        writes: list[bytes] = []
+        monkeypatch.setattr(
+            "letterbox.adapters.base.inject_to_pty",
+            lambda _fd, payload: writes.append(payload),
+        )
+        adapter = _make_cls(terminator_delay=0.0)()
+        await adapter.inject(_dummy_handle(), "hi")
+        assert writes == [b"hi\r"]
+
+    @pytest.mark.asyncio
+    async def test_inject_delayed_terminator_is_separate_write(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ADR-057: terminator_delay > 0 (Gemini, Antigravity) emits the text and
+        # the terminator as TWO writes with a gap between them, so the terminator
+        # clears the harness's fast-return window and registers as a submit — the
+        # fix for "message lands in the input box but never submits". The delay
+        # is awaited between the writes.
+        writes: list[bytes] = []
+        monkeypatch.setattr(
+            "letterbox.adapters.base.inject_to_pty",
+            lambda _fd, payload: writes.append(payload),
+        )
+        slept: list[float] = []
+
+        async def _fake_sleep(secs: float) -> None:
+            slept.append(secs)
+
+        monkeypatch.setattr("letterbox.adapters.base.asyncio.sleep", _fake_sleep)
+        adapter = _make_cls(terminator_delay=0.05)()
+        await adapter.inject(_dummy_handle(), "hi")
+        assert writes == [b"hi", b"\r"]
+        assert slept == [0.05]
 
     @pytest.mark.asyncio
     async def test_inject_calls_pre_inject_to_transform_message(

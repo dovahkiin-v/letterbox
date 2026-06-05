@@ -104,6 +104,10 @@ class TestAntigravityAdapterConfig:
         assert AntigravityAdapter.notification_template == _VISION_TEMPLATE
         # line_terminator is the inherited base default — NOT overridden.
         assert AntigravityAdapter.line_terminator == b"\r"
+        # Like Gemini: settings-wired (no --mcp-config, ADR-054) and a delayed
+        # terminator to clear the fast-return submission gate (ADR-057).
+        assert AntigravityAdapter.mcp_config_via_flag is False
+        assert AntigravityAdapter.terminator_delay == 0.1
 
     def test_registered_under_antigravity(self) -> None:
         # Module-level @register_adapter fired at import; the live registry
