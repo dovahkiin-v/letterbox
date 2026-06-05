@@ -4,6 +4,16 @@ Architectural Decision Records (ADRs). **Newest at top**, oldest at bottom. ADR 
 
 ---
 
+## ADR-060 — Antigravity's letterbox MCP server is wired via a local `agy` plugin whose server file MUST be named `mcp_config.json`
+
+**Date:** 2026-06-05
+**Context:** ADR-054 established that Gemini and Antigravity are settings-wired (they don't take Claude's `--mcp-config` flag), and the first live Antigravity bridge confirmed the PTY layer works — but the agent had **no letterbox tools**, because nothing registered the MCP server with `agy`. Unlike Gemini (a flat `mcpServers` key in `~/.gemini/settings.json`), `agy`'s own `settings.json` (`~/.gemini/antigravity-cli/settings.json`) has no `mcpServers` key. `agy` loads MCP servers from **plugins** (`agy plugin install <dir>`, where `<dir>` holds a `plugin.json` manifest). Empirically probing `agy plugin validate`: an inline `mcpServers` key in `plugin.json` is ignored, and a `.mcp.json` file is silently skipped (the Go plugin walker ignores the dotfile). The validator recognises the server only when it is in a file named exactly **`mcp_config.json`** (`{"mcpServers": {…}}`) — then it reports `mcpServers : 1 processed`.
+**Decision:** Wire letterbox into Antigravity as a minimal local plugin directory containing two files: `plugin.json` (manifest — `name`/`version`/`description`) and `mcp_config.json` (the letterbox server, `command` = absolute `letterbox` path, `args` = `["mcp"]`, channel-agnostic — the launcher passes channel/identity by env per ADR-055). Install with `agy plugin install <dir>`; remove with `agy plugin uninstall letterbox`. The canonical scaffold lives at `~/.letterbox/agy-plugin/letterbox/`. This is documented in the README's per-harness Setup and in `skills/letterbox/SKILL.md` (the agent-facing self-wiring guide).
+**Rationale:** The `mcp_config.json` filename is non-obvious and was the entire blocker — a `.mcp.json` (the Claude-plugin convention) validates "ok" while silently contributing no server, which would read as success and fail in use. Recording the exact filename, the install/uninstall commands, and the `agy`-uses-plugins-not-settings distinction turns a reverse-engineering session into a one-paste setup. Keeping the server file channel-agnostic preserves the same "launch is the only per-channel action" UX the other two harnesses already have.
+**Supersedes:** None. Fills in the Antigravity half of ADR-054's per-adapter MCP-wiring contract (Claude = `--mcp-config`; Gemini = `settings.json` `mcpServers`; Antigravity = `agy` plugin with `mcp_config.json`).
+
+---
+
 ## ADR-059 — `letterbox agy` is accepted as a CLI alias for the `antigravity` harness subcommand
 
 **Date:** 2026-06-05

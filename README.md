@@ -105,13 +105,31 @@ This entry is **channel-agnostic on purpose.** The launcher exports `LETTERBOX_C
 
 `TRUST_FOLDER` trusts exactly that directory; `TRUST_PARENT` trusts it and everything beneath, so one entry covers all your project folders. (Tip: don't reach for Gemini's `--skip-trust` flag to dodge this — it forces a workspace-system-prompt lookup that crashes even in already-trusted directories. Trust the folder instead.)
 
-### Antigravity (`agy`) — same pattern, experimental
+### Antigravity (`agy`)
 
-Launch it as **`letterbox agy …`** (the long form `letterbox antigravity …` also works — `agy` is just an alias matching the binary name).
+Launch it as **`letterbox agy …`** (the long form `letterbox antigravity …` also works — `agy` is just an alias matching the binary name). Antigravity receives its per-launch channel and identity through the same environment variables as Gemini; what differs is how you register the MCP server. `agy` loads MCP servers from **plugins**, so you install letterbox as a tiny local plugin (a directory with two JSON files):
 
-Antigravity is settings-wired like Gemini: it receives the per-launch channel and identity through the same environment variables, and you register letterbox in Antigravity's own MCP configuration so the agent gets the tools.
+```bash
+# 1. Build the plugin (one directory, two files). Use the absolute
+#    `letterbox` path from `which letterbox`.
+mkdir -p ~/.letterbox/agy-plugin/letterbox
+cat > ~/.letterbox/agy-plugin/letterbox/plugin.json <<'JSON'
+{ "name": "letterbox", "version": "1.0.0",
+  "description": "Letterbox file-based AI-to-AI comms bridge." }
+JSON
+cat > ~/.letterbox/agy-plugin/letterbox/mcp_config.json <<'JSON'
+{ "mcpServers": { "letterbox": {
+    "command": "/absolute/path/to/letterbox", "args": ["mcp"] } } }
+JSON
 
-The PTY layer is **verified live** — notifications inject both directions and messages are delivered. The remaining step is registering the letterbox MCP server in `agy`; until that's wired, the agent is still woken by `📬` notifications but has no `send_message` / `check_messages` tools, so it falls back to reading and writing the channel's message files directly. (It works — just the long way round.) Treat Antigravity as **experimental** until the MCP wiring is confirmed end-to-end.
+# 2. Install it (and confirm).
+agy plugin install ~/.letterbox/agy-plugin/letterbox
+agy plugin list
+```
+
+The `mcp_config.json` is channel-agnostic for the same reason Gemini's settings entry is — the launcher passes the channel and identity by environment at launch. Like Gemini, `agy` also gates on folder trust: it honours a `trustedWorkspaces` list in `~/.gemini/antigravity-cli/settings.json`, so add the directory you launch from there if it isn't already.
+
+> **Status:** the PTY layer (notifications + message delivery, both directions) is **verified live**, and the plugin install above wires the tools cleanly. The full tools-in-`agy` round trip is freshly working and lightly exercised — treat Antigravity as **the newest of the three** and report anything odd.
 
 ## Quickstart
 
@@ -223,6 +241,7 @@ This anti-scope is what lets letterbox be small, inert, auditable, and durable.
 ## See also
 
 - [`examples/two-claudes-debating/`](examples/two-claudes-debating/) — the hands-on walkthrough: two Claude Code sessions debating in real time.
+- [`skills/letterbox/SKILL.md`](skills/letterbox/SKILL.md) — the agent-facing operating guide: how an LLM uses the bridge and wires up comms itself (per harness) with no human in the loop.
 - The full file-format and protocol reference lives in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 - [`DECISIONS.md`](DECISIONS.md) — the architecture decision records (ADRs) behind every load-bearing choice, including the per-harness MCP wiring (ADR-054/055), dormant mode and the `channel_info` oracle (ADR-056), the submit-timing fix (ADR-057), and the self-maintaining read marker (ADR-058).
 - [`LICENSE`](LICENSE) — MIT.
