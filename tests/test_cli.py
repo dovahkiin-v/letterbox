@@ -179,6 +179,15 @@ class TestHarnessDispatch:
         _args, kwargs = patched_launcher.calls[0]
         assert kwargs["extra_args"] == ["--no-permissions-prompt"]
 
+    def test_agy_alias_dispatches_as_antigravity(self, patched_launcher) -> None:
+        # ``letterbox agy`` is an alias for ``antigravity``; it must route to the
+        # canonical registry key, not the typed spelling, so the adapter lookup
+        # and the [harness.antigravity] config block resolve unchanged.
+        cli.main(["agy", "--channel", "c", "--as", "tower"])
+        args, kwargs = patched_launcher.calls[0]
+        assert args == ("antigravity", "c")
+        assert kwargs["as_label"] == "tower"
+
     def test_passthrough_strips_only_first_double_dash(self, patched_launcher) -> None:
         # The `--` itself is stripped; everything after it (including a second
         # `--`) is verbatim passthrough (Gotcha #2).

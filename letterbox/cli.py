@@ -33,6 +33,13 @@ __all__ = ["main"]
 # the registered adapter keys (W12, 8a) and the ``[harness.*]`` config blocks.
 _HARNESSES = ("claude", "gemini", "antigravity")
 
+# Friendly subcommand aliases that route to a canonical harness. ``agy`` is the
+# Antigravity binary name and the way people actually launch it, so
+# ``letterbox agy`` is accepted alongside ``letterbox antigravity`` — both pin
+# ``harness_name="antigravity"`` (the registry key), so the alias is purely a
+# spelling convenience at the CLI surface.
+_HARNESS_ALIASES: dict[str, tuple[str, ...]] = {"antigravity": ("agy",)}
+
 # Subcommands with a fixed, closed flag surface that must REJECT leftover argv
 # with a vector error (Framework P3 / G2). Harnesses plus the two read commands
 # 9b lands, ``init`` (9c's closed ``--channel``/``--global`` surface), and
@@ -171,7 +178,15 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     for name in _HARNESSES:
-        sub = subparsers.add_parser(name, help=f"Launch {name} on a channel.")
+        # Antigravity's binary is ``agy`` and that is how people invoke it, so
+        # accept ``letterbox agy`` as an alias. ``harness_name`` is pinned via
+        # set_defaults to the canonical registry key (``antigravity``) regardless
+        # of which spelling the user typed, so dispatch, the ``[harness.antigravity]``
+        # config block, and the adapter lookup are all unaffected by the alias.
+        aliases = _HARNESS_ALIASES.get(name, ())
+        sub = subparsers.add_parser(
+            name, aliases=list(aliases), help=f"Launch {name} on a channel."
+        )
         _add_harness_flags(sub)
         sub.set_defaults(handler=_handle_harness, harness_name=name)
 

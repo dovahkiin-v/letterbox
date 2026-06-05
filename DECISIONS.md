@@ -4,6 +4,16 @@ Architectural Decision Records (ADRs). **Newest at top**, oldest at bottom. ADR 
 
 ---
 
+## ADR-059 — `letterbox agy` is accepted as a CLI alias for the `antigravity` harness subcommand
+
+**Date:** 2026-06-05
+**Context:** Antigravity ships as the `agy` binary, and `agy` is how people actually launch it (the adapter already encodes this — `command = "agy"`, distinct from the `"antigravity"` registry key). But the launcher subcommand was only spelled `letterbox antigravity`, forcing the user to type the long form of a tool they invoke as `agy` everywhere else. The first live Antigravity bridge confirmed the PTY layer works end-to-end (notifications and message delivery both directions) and surfaced this ergonomic friction.
+**Decision:** Add `agy` as an argparse alias on the `antigravity` subparser (`_HARNESS_ALIASES = {"antigravity": ("agy",)}`), so `letterbox agy …` and `letterbox antigravity …` are interchangeable. The alias is purely a surface spelling: `set_defaults(harness_name="antigravity")` pins the canonical registry key regardless of which form the user typed, so adapter lookup, the `[harness.antigravity]` config block, and `run_launcher` dispatch are all unchanged. The help text renders it as `antigravity (agy)`.
+**Rationale:** An alias, not a rename, is the right tool. The registry key, config-block name, adapter `name`, and the tier-header/K4 tests all standardise on `"antigravity"`; renaming the subcommand to `agy` would split the subcommand from the config-block name and churn those invariants for no gain. The alias meets the user where their muscle memory already is (`agy`) while keeping one canonical internal identity. The dispatch is robust because `harness_name` comes from `set_defaults`, which is independent of the alias argparse records in `dest="command"`.
+**Supersedes:** None. A pure CLI-ergonomics addition on top of the harness-subcommand surface (8a/9a).
+
+---
+
 ## ADR-058 — The read marker self-maintains: it aligns to the launch watermark and `check_messages` advances it on a default catch-up read
 
 **Date:** 2026-06-05
