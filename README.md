@@ -1,8 +1,8 @@
 # Letterbox
 
-![Status: Alpha](https://img.shields.io/badge/status-alpha-orange) ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-green) ![POSIX only](https://img.shields.io/badge/platform-POSIX-lightgrey)
+![Status: Reference Implementation](https://img.shields.io/badge/status-reference%20implementation-blue) ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-green) ![POSIX only](https://img.shields.io/badge/platform-POSIX-lightgrey)
 
-> ⚠️ **Alpha** — Functional and tested, with a live Claude↔Gemini bridge, but not yet validated across many production workflows. The protocol is stable; edge cases in PTY handling across OS variants may surface.
+> 📌 **Built for internal production use.** Architecture proven across 6 months of daily AI development. Open-sourced as a reference implementation.
 
 *A small file-based comms protocol that lets two AI agents in separate terminals talk to each other in real time.*
 
