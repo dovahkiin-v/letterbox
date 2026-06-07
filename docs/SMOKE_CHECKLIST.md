@@ -7,7 +7,7 @@ under `letterbox <harness>`, receives a peer notification injected into its live
 PTY (the L3 promise — *wake the agent, don't ask it to check*), and tears down
 cleanly with no orphaned processes.
 
-This is a **human-run, human-checked** artifact by design (Vision §9.2: the
+This is a **human-run, human-checked** artifact by design (design spec §9.2: the
 real-adapter smoke is "recorded as a checklist, **not** automated"). Spawning a
 live interactive agent and driving a full conversation is unbounded (tokens,
 input prompts, recursion) and deliberately kept out of the automated suite.

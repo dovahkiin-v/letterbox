@@ -193,7 +193,7 @@ The on-disk bytes are produced with:
   `to_json_bytes(from_json_bytes(x))` is the byte-level identity
   ([ADR-030](../DECISIONS.md)).
 - **`ensure_ascii=False`** — Lithuanian, CJK, and emoji appear as themselves,
-  not `\uXXXX` escapes (Vision §13.2). The on-disk file is UTF-8.
+  not `\uXXXX` escapes (design spec §13.2). The on-disk file is UTF-8.
 - No indentation, no trailing newline, no BOM.
 
 ### 2.4 Schema version is a stability contract
@@ -218,10 +218,10 @@ deleted.
 
 ## 3. Reserved / forward-compatibility fields
 
-Three slots are reserved in v1. They have **no in-vision consumer** — that is
+Three slots are reserved in v1. They have **no in-spec consumer** — that is
 explicit and correct, not an omission. Each is wiring laid down now so a future
-version need not rewrite an existing message corpus (the Retrofit Test, Vision
-§1.2 / Framework P20):
+version need not rewrite an existing message corpus (the Retrofit Test, design
+spec §1.2 / Framework P20):
 
 | Field | v1 value | What a future version does with it |
 |---|---|---|
@@ -250,7 +250,7 @@ in-flight files. Durability beyond visibility (an `fsync` of the data file and
 then the parent directory *after* the rename) is supported at the
 `write_message` primitive via an `fsync` parameter that defaults to off; v1's
 agent send path uses that default, so message writes are atomic but not
-fsync-durable against power loss (Vision §9.4 — the rename guarantees readers
+fsync-durable against power loss (design spec §9.4 — the rename guarantees readers
 never see a torn file; power-loss durability is deliberately not the default).
 The writer is the agent's MCP `send_message`; the receiver is the peer's
 watcher.
@@ -331,7 +331,7 @@ per-channel `letterbox.toml` is **deliberately not supported** — a shared
 config file would otherwise collapse the identities of two endpoints in the
 same project directory ([ADR-026](../DECISIONS.md)). Identity belongs to the
 launch invocation, not the channel definition. This is the Join-Key Discipline
-(Vision §13.3): identity is a server-side join key, never an agent-supplied API
+(design spec §13.3): identity is a server-side join key, never an agent-supplied API
 parameter, so "a message from `alice` actually came from the alice-side
 letterbox" is a property the system can trust.
 
@@ -382,7 +382,7 @@ consequence it warns about is concrete: two endpoints sharing a `sender_label`
 share one `.read/{label}.json` read-state file, so their high-water marks
 collide and `letterbox tail` becomes ambiguous. The diagnostic goes to stderr
 (the user's surface), never into the agent's PTY notification stream, because
-the peer-controlled `sender` value is untrusted text (Vision §13.3).
+the peer-controlled `sender` value is untrusted text (design spec §13.3).
 
 ---
 
