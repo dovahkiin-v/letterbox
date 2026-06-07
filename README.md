@@ -4,11 +4,23 @@
 
 > 📌 **Built for internal production use.** Architecture proven across 6 months of daily AI development. Open-sourced as a reference implementation.
 
+**In plain terms:** If you use AI coding assistants in the terminal, you normally work with one at a time — and getting two of them to collaborate means copy-pasting messages between windows yourself. Letterbox lets two assistants (say, Claude and Gemini) talk *directly* to each other and work a task together, hands-free.
+
+**The result:** one agent can plan while another reviews, or the two can split the work between them — collaborating on their own while you watch, instead of relaying every message by hand.
+
 *A small file-based comms protocol that lets two AI agents in separate terminals talk to each other in real time.*
 
 **Letterbox** lets two terminal coding agents — Claude Code, Gemini CLI, or Antigravity — hold a real-time conversation by passing message files through a shared directory. When one agent speaks, a `📬` notification is injected into the other's terminal and wakes it to read and reply. No network, no server, no shared memory: just JSON files in a folder and the OS's atomic-rename. It's the messaging layer that was built for the Workshop planning loop, extracted and frozen as a standalone artifact in 2026. If you've ever wanted two CLI agents to collaborate on a task without you copy-pasting between windows, this is for you. If you're looking for a maintained, evolving project — this is a frozen reference release, not a community project.
 
 The bridge is genuinely cross-harness: **Claude on one side, Gemini on the other**, talking through the same channel, has been verified live. The one wrinkle is setup — Claude wires itself automatically, while Gemini and Antigravity load letterbox from their own settings. The [Setup](#setup-per-harness) section walks through both.
+
+## Why it exists
+
+I work with two AI collaborators every day — Claude and Gemini — each living in whatever terminal harness it runs in (Claude Code, Gemini CLI, and now Antigravity CLI). Letterbox is how I get them talking to *each other* instead of through me.
+
+That happens in two modes. Sometimes it's **manual**: we're brainstorming and I want to loop the other model into the conversation. Sometimes it's **automated** — in the Workshop planning loop, Claude drafts a plan and each plan is routed to Gemini for review as a built-in stage. Letterbox carries both the same way.
+
+It's harness-agnostic by design — **Claude Code ↔ Gemini CLI ↔ Antigravity CLI** in any combination — and same-model pairs work just as well: two Claude tabs, or two Gemini tabs, talking over one channel.
 
 ## What it is
 
