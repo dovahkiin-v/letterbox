@@ -227,7 +227,7 @@ version need not rewrite an existing message corpus (the Retrofit Test, Vision
 |---|---|---|
 | `address` | always `"file://local"` | Declares the transport scheme. A future network mode writes `"ssh://host/path"` or `"nats://channel/…"` without reshaping existing files. v1 readers accept any value but process only `file://local`. |
 | `metadata.encryption` | always `null` | A future encryption layer populates cipher metadata (e.g. `{"scheme": "age", "key_id": "…"}`). v1 readers see `null` and skip. |
-| `metadata.ext` | always `{}` (or caller-supplied dict) | Open extension point for consumers (e.g. a future Workshop layer adds `{"phase": "1a"}`). Letterbox **preserves but never interprets** it. |
+| `metadata.ext` | always `{}` (or caller-supplied dict) | Open extension point for consumers (e.g. a future planning layer adds `{"phase": "1a"}`). Letterbox **preserves but never interprets** it. |
 
 Reserving these costs three JSON keys per message and zero implementation
 effort, but spares any future user from rewriting their entire corpus to add a

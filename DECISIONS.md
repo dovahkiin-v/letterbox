@@ -363,7 +363,7 @@ teardown: pre_teardown(handle)                      → close_pty_handle(...)
 **Date:** 2026-05-27
 **Context:** Earlier drafts had `default_sender` / `default_recipient` declared per-channel in `letterbox.toml`. In a shared-project-directory scenario (the most common case — both endpoints in the same repo, reading the same toml), both letterbox processes would pick up the same `default_sender`, collapsing identity. Two Claudes in the same project directory would both write `sender: "claude"`.
 **Decision:** Drop `default_sender` and `default_recipient` from per-channel config entirely. Identity resolution at launch: **(1)** `--as <label>` CLI flag (highest priority); **(2)** `LETTERBOX_SENDER` env var; **(3)** harness name (`claude`, `gemini`, `antigravity`) as default. PTY-Parent resolves identity once and propagates to the MCP child via `letterbox mcp --as <label>` arg.
-**Rationale:** Identity is a property of the *launch*, not the *channel*. Two terminals on the same channel can (and often do) have different identities — that's the whole point of dialogue. Config files describing channels should describe the channel, not assert which side of it any particular launch represents. The cross-harness case (Claude+Gemini) just works by default because the harness names differ. The same-harness case requires `--as` — empirically how it's always worked in the Workshop bridge.
+**Rationale:** Identity is a property of the *launch*, not the *channel*. Two terminals on the same channel can (and often do) have different identities — that's the whole point of dialogue. Config files describing channels should describe the channel, not assert which side of it any particular launch represents. The cross-harness case (Claude+Gemini) just works by default because the harness names differ. The same-harness case requires `--as` — empirically how it's always worked in the planning-loop bridge.
 **Supersedes:** Per-channel `default_sender`/`default_recipient` config fields. Amends ADR-005's channel config description.
 
 ---
@@ -383,7 +383,7 @@ teardown: pre_teardown(handle)                      → close_pty_handle(...)
 **Date:** 2026-05-27
 **Context:** Earlier design had the watcher scan the channel directory at startup and emit notifications for every unread peer message — interpreted via the endpoint's `high_water_mark`. With a long-running channel and a recent crash, this could mean 30+ notifications firing immediately on startup, bombing the agent's context with stale messages and forcing it to respond to historical state when the user may have wanted a clean restart.
 **Decision:** Watcher records a "start watermark" at init (the newest filename present, or current UTC timestamp if empty) and fires notifications **only for messages that arrive strictly after that point**. Backlog is not surfaced automatically. The agent has two MCP tools — `check_latest_message()` (returns single newest unread, minimal context cost) and `check_messages(limit, since_id)` (paginated catch-up) — that surface backlog explicitly when the user prompts the agent to check.
-**Rationale:** "Wake the Agent" (L3) is about *new arrivals*, not historical replay. A restart often means "fresh start," not "catch me up on everything I missed." User agency is load-bearing: the user is in the loop, and they decide whether catch-up is wanted. Auto-flooding violates that by imposing a response to history. `check_latest_message` was the affordance pattern in the original Workshop bridge and is reintroduced for the same reason — it gives the user a low-cost way to opt into catch-up without paying the full pagination cost.
+**Rationale:** "Wake the Agent" (L3) is about *new arrivals*, not historical replay. A restart often means "fresh start," not "catch me up on everything I missed." User agency is load-bearing: the user is in the loop, and they decide whether catch-up is wanted. Auto-flooding violates that by imposing a response to history. `check_latest_message` was the affordance pattern in the original planning-loop bridge and is reintroduced for the same reason — it gives the user a low-cost way to opt into catch-up without paying the full pagination cost.
 **Supersedes:** Earlier implicit assumption that the watcher would rescan-and-fire on startup. Also reframes a portion of ADR-022's cross-restart concern: with no startup rescan, the cross-restart self-notification flood is structurally impossible regardless of filter logic. The combined `(sender OR instance_id)` filter still governs `check_messages` result classification (so the agent doesn't see its own past-session messages when explicitly catching up), but the watcher's auto-notify path no longer needs it.
 
 ---
@@ -393,7 +393,7 @@ teardown: pre_teardown(handle)                      → close_pty_handle(...)
 **Date:** 2026-05-27
 **Context:** Gemini's review raised concern that PTY injection during a tool-call subprocess could land in the subprocess's stdin (potentially corrupting bash scripts, vim sessions, etc.). The theoretical fix is checking `os.tcgetpgrp(handle.master_fd)` before each injection and deferring when a subprocess is in the foreground.
 **Decision:** Document the harness's input-queueing behavior as an **assumption** in letterbox's interoperability contract, not a runtime check letterbox enforces. The three v1 adapters target harnesses (Claude Code, Gemini CLI, Antigravity CLI) that all queue PTY input correctly during tool calls — input received while the agent is busy is buffered and processed once the agent's main loop is free. Adapters for harnesses that *don't* queue properly are responsible for their own coordination.
-**Rationale:** Empirically verified that all three v1 harnesses queue properly (Vinga's daily Workshop use over months). Adding tcgetpgrp scaffolding to letterbox would solve a problem the v1 adapters don't have. If a future adapter targets a non-queueing harness, that's an adapter-level concern (it can implement queue checks in its `inject` override). The frozen-artifact discipline (L8) favors documenting clear assumptions over building defensive scaffolding for hypothetical cases.
+**Rationale:** Empirically verified that all three v1 harnesses queue properly (Vinga's daily planning-loop use over months). Adding tcgetpgrp scaffolding to letterbox would solve a problem the v1 adapters don't have. If a future adapter targets a non-queueing harness, that's an adapter-level concern (it can implement queue checks in its `inject` override). The frozen-artifact discipline (L8) favors documenting clear assumptions over building defensive scaffolding for hypothetical cases.
 **Supersedes:** Earlier (briefly entertained) plan to bake foreground-process-group checks into the adapter base class.
 
 ---
@@ -592,7 +592,7 @@ teardown: pre_teardown(handle)                      → close_pty_handle(...)
 **Date:** 2026-05-26
 **Context:** Considered making letterbox a pure MCP server with `check_messages` tool, leaving it to the agent to decide when to check.
 **Decision:** Letterbox owns a launcher that spawns the agent CLI as a PTY child and injects "new message" notifications into stdin when a peer writes.
-**Rationale:** Polling-by-instruction is slower than copy-paste between windows — verified empirically during Workshop development. The agent has to be *woken* for real-time comms to feel real.
+**Rationale:** Polling-by-instruction is slower than copy-paste between windows — verified empirically during planning-loop development. The agent has to be *woken* for real-time comms to feel real.
 **Supersedes:** None.
 
 ---
@@ -610,7 +610,7 @@ teardown: pre_teardown(handle)                      → close_pty_handle(...)
 ## ADR-001 — Frozen artifact, not maintained project
 
 **Date:** 2026-05-26
-**Context:** Letterbox is being extracted from the Workshop loop as a standalone OSS artifact, companion to the "Lessons from the Forge" essay launching 2026-06-02.
+**Context:** Letterbox is being extracted from a planning loop as a standalone OSS artifact.
 **Decision:** Ship v1 as a frozen artifact. Complete, documented, MIT-licensed, but with no commitment to issues, PRs, or releases beyond v1.
 **Rationale:** Vinga doesn't use social media [[feedback_no_social_media]] and has no bandwidth to nurture a community. Honest framing ("here is the system as of June 2026") beats implied promises of maintenance.
 **Supersedes:** None — first decision.

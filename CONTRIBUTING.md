@@ -7,8 +7,7 @@ welcome, what isn't, and why.
 ## What "frozen artifact" means
 
 Letterbox v1 ships **complete, documented, and MIT-licensed**. It is "the
-system as of June 2026" — a companion to the *Lessons from the Forge* essay,
-and a personal artifact rather than a product. There is **no commitment to
+system as of June 2026" — a personal artifact rather than a product. There is **no commitment to
 issues, pull requests, or releases beyond v1.**
 
 **Frozen here means *unsupported and complete as of this version* — not
@@ -59,8 +58,8 @@ a future need won't force a destructive migration:
   base class + TOML registry already accommodate a new harness by config.
 - **IDE integrations** (VS Code, Cursor, Antigravity IDE) — each layers on top
   of letterbox unchanged; each is its own project.
-- **Peer-review / workshop-style state machine** — lives in the downstream
-  Workshop, not in letterbox.
+- **Peer-review / planning-style state machine** — lives in the downstream
+  planning loop, not in letterbox.
 - **Network-mode comms** (HTTP / gRPC / message queue) — deferred *with a
   forward hook*: the reserved `address` field exists so a future scheme
   doesn't force a message-format migration.

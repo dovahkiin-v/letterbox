@@ -619,7 +619,7 @@ class TestReservedFields:
 
     def test_ext_unrecognised_keys_preserved(self) -> None:
         # Vision §3.2: "Letterbox preserves but never interprets metadata.ext".
-        ext = {"phase": "2a", "future_field": [1, 2, 3], "x-vendor": "Workshop"}
+        ext = {"phase": "2a", "future_field": [1, 2, 3], "x-vendor": "planning-loop"}
         msg = _make(ext=ext)
         assert from_json_bytes(to_json_bytes(msg)).metadata.ext == ext
 
