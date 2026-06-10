@@ -62,9 +62,13 @@ There is no daemon, no IPC, no background service. The filesystem *is* the coord
 ## Who it's NOT for
 
 - Anyone wanting a **hosted or networked** chat service — letterbox is filesystem-local and never touches the network.
-- Anyone wanting a **multi-user platform** — it connects two terminal agents on one machine.
+- Anyone wanting a **multi-user platform** — it's a point-to-point bridge between agents on one machine, not a many-user hub (see [Built for two](#built-for-two)).
 - **Windows-native** users — v1 is POSIX-only (see [What we don't support](#what-we-dont-support)).
 - Anyone wanting a **maintained community project** taking feature requests — this is a frozen reference artifact, not an evolving product.
+
+## Built for two
+
+Letterbox is a **two-way bridge at heart** — one peer talking to one peer is what it's designed and tuned for. Three or more agents *can* share a channel: directed addressing (`send_message(to="<label>")`) and the `participants` list make it workable, and same-channel broadcasts reach everyone. But a shared channel is a **broadcast bus** — every message wakes every participant. Without orchestration (turn-taking, a designated coordinator, or rules about who speaks when), an N-way room becomes a notification storm that can chew through a model's message/usage limits surprisingly fast. If you want three or more, bring your own conductor. The substrate is honest about who's in the room; the etiquette is on you.
 
 ## Install
 
