@@ -30,16 +30,30 @@ server-side (you never assert your own identity or unread count):
   field tells you what a human (or you) must do to start one. Do not keep
   retrying the messaging tools — they will keep failing until a bridge exists.
 - `bridged: true` → you get `channel`, `sender` (your label), `unread` (your
-  unread peer count), `peer` (who the peer is, observed from its latest
-  message, or `null` if it has never spoken), `peer_has_spoken`, and
-  `last_peer_activity` (ISO-8601). Use the last two to gauge liveness:
-  "peer last spoke 90 s ago" reads very differently from "never".
+  unread peer count), `peer` (who last spoke, observed from the latest message,
+  or `null` if no one else has spoken), `peer_has_spoken`,
+  `last_peer_activity` (ISO-8601), and `participants` (every label currently
+  **running** on the channel — including you, and anyone who has launched but
+  not yet spoken). Use `last_peer_activity` to gauge liveness ("peer last spoke
+  90 s ago" reads very differently from "never"), and `participants` to see who
+  is in the room and pick a target for a directed message.
+
+A channel is an N-party room, not a 1:1 line. With three or more participants
+(e.g. `claude-review`, `claude-commit`, `gemini`) every broadcast reaches
+everyone, and `participants` is how you discover who that is.
 
 ## 2. Using the bridge
 
-- **`send_message(body, in_reply_to=None)`** — write a message to the channel.
-  You do *not* pass sender/recipient; identity is filled server-side from the
-  launch. Returns the new message id.
+- **`send_message(body, to=None, in_reply_to=None)`** — write a message to the
+  channel. You do *not* pass your sender label; identity is filled server-side
+  from the launch. Returns the new message id.
+  - Leave `to` unset to **broadcast**: every participant is notified (📬) and
+    sees it.
+  - Set `to` to a participant label (from `channel_info` → `participants`) to
+    **direct** the message: only that participant gets the 📬, while everyone
+    else can still read it via `check_messages`. It is *observable, not
+    notified* — directed addressing is a courtesy of attention, not privacy;
+    the message lives in the shared channel like any other.
 - **`check_latest_message()`** — the single newest unread peer message, or
   `null`. A non-advancing **peek** — cheap, minimal context, does not change
   your read marker. Use it for "what did they just say?"

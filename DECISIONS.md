@@ -4,6 +4,26 @@ Architectural Decision Records (ADRs). **Newest at top**, oldest at bottom. ADR 
 
 ---
 
+## ADR-062 — A channel is N-party: directed messages are *observable but not notified*, and `channel_info` reports live `participants`
+
+**Date:** 2026-06-10
+**Context:** The read filter has always been "every message that is not my own write is for me" (`_is_own_write`, ADR-022), and the message format carried a `recipient` field that was inert ("informational in v1"). That already made a channel an N-party broadcast bus mechanically — three endpoints (`claude-review`, `claude-commit`, `gemini`) on one channel all see each other's traffic — but two things were missing for it to be *usable* as a group: (1) no way to address one participant specifically, and (2) no way to discover who is in the room (`channel_info` reported a singular `peer` = whoever spoke last, which can't answer "who can I talk to?").
+**Decision:** Activate the dormant `recipient` field as **directed addressing**, with *observable-but-not-notifiable* semantics. `send_message(body, to=None, in_reply_to=None)`: `to` unset → broadcast (recipient `None`, everyone notified); `to=<label>` → directed (recipient set; an empty `to` normalizes to broadcast). The **read path is unchanged** — `check_messages`/`check_latest_message` still return every non-own message regardless of recipient, so a directed message stays readable by everyone. Only the **watcher** changes: a new Filter 7 suppresses the 📬 notification when `recipient` is non-empty and is not this endpoint. So a directed message wakes only its target; others can still read it on demand. `channel_info` gains a `participants` list — the labels currently **running** on the channel, derived from the live pid-locks (ADR-061), so it surfaces even a participant who has launched but not yet spoken.
+**Rationale:** Observable-not-notifiable is the honest semantic for a shared-directory protocol: the file physically lives in the channel, so claiming privacy would be a lie (§13.3 trust model). What directed addressing genuinely controls is *attention* — who gets pinged — not *visibility*. This keeps the human/observer transparency of a group channel while letting agents run focused sub-dialogues (`claude-review` → `claude-commit`) without spamming everyone. Sourcing `participants` from the pid-locks (who is running) rather than message history (who has spoken) answers the question an agent actually has before addressing a directed message — there is no reply to observe yet. The change set is small precisely because the substrate was already N-party; this is activation, not redesign.
+**Supersedes:** None. Activates the v1-dormant `recipient` field (ADR-022's own-write filter is unchanged — recipient filtering lives only in the watcher's notify path) and extends ADR-056's `channel_info` oracle with `participants`.
+
+---
+
+## ADR-061 — A duplicate sender label on the same channel is refused via a per-channel pid-lock
+
+**Date:** 2026-06-10
+**Context:** With N-party channels (ADR-062), two endpoints launched under the same `--as` label on one channel are indistinguishable — their messages collide on identity, and the watcher already had to emit an identity-collision warning to flag the misconfiguration after the fact. Nothing prevented the bad launch in the first place. The natural scenario that motivated this — running `claude-review` and `claude-commit` as distinct participants — only works if the system pushes you toward distinct labels.
+**Decision:** Before spawning, the launcher claims a **pid-lock** at `state_dir/locks/<channel>/<sender_label>.pid` containing its pid. If a lock already exists and its pid is alive (`os.kill(pid, 0)`), the launch is refused with a fail-loud vector that suggests a distinct name (`--as <label>-2`); a stale lock (dead pid or unreadable contents) is silently overwritten. The lock is released on every teardown path (clean exit, signal, crash-rollback) via `run_launcher`'s `finally`. The lock is **per-channel**, not global: `claude` on `demo` and `claude` on `review` are different conversations and must not false-collide. The lock primitives live in a new Tier-1 leaf `locks.py` (stdlib-only) so both the launcher (Tier 4) and the MCP server (Tier 4, for `participants`) can share the convention without violating the Tier-4 sibling bulkhead (§13.5).
+**Rationale:** Refusing at launch is strictly better than warning after the fact — the collision never enters the channel. Per-channel scoping is the correct granularity because identity attribution is a per-channel property; a global lock would forbid legitimate cross-channel reuse of a label. Liveness via `os.kill(pid, 0)` is best-effort (a recycled pid could read as alive) — acceptable for a human-interactive guard under the same trust model as the rest of letterbox, not an enforcement boundary. The TOCTOU window between the existence check and the write is microseconds on an interactive CLI and is left unhardened deliberately.
+**Supersedes:** None. Complements the watcher's identity-collision warning (ADR-022 / Vision §3.4.1) by preventing the collision upstream rather than only diagnosing it.
+
+---
+
 ## ADR-060 — Antigravity's letterbox MCP server is wired via a local `agy` plugin whose server file MUST be named `mcp_config.json`
 
 **Date:** 2026-06-05

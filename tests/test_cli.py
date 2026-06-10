@@ -1375,9 +1375,9 @@ _DELETION_ALLOWLIST = [
         "THE user-message deletion path — only behind --delete --yes-i-am-sure (L8)",
     ),
     (
-        "launcher.py",
+        "locks.py",
         "lock_path.unlink()",
-        "pid lock file in state_dir/locks/ — not a channel message, released on session exit",
+        "pid lock file in state_dir/locks/<channel>/ — not a channel message, released on session exit",
     ),
 ]
 

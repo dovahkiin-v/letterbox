@@ -25,7 +25,7 @@ from pathlib import Path
 # forbids only the two heavy Tier-4 siblings (``launcher``/``mcp_server``),
 # which stay lazy inside their handlers. Mirrors how ``mcp_server`` (also
 # Tier 4) imports ``channel``/``config``/``protocol`` at module top.
-from letterbox import channel, config, notifications, protocol
+from letterbox import channel, config, locks, notifications, protocol
 
 __all__ = ["main"]
 
@@ -380,7 +380,7 @@ def _handle_harness(
         KeyError,
         channel.StatePermissionsError,
         notifications.NotificationTemplateError,
-        launcher.AlreadyRunningError,
+        locks.AlreadyRunningError,
     ) as exc:
         # The harness-path error-vector contract (ADR-053, extending ADR-050/051).
         # These five types are the EXPECTED pre-spawn startup failures from

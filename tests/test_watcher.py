@@ -2814,3 +2814,89 @@ class TestRecoveryContracts:
                 await wait_for(lambda: queue.qsize() > 0, timeout=0.4)
         finally:
             await w.stop()
+
+
+class TestDirectedAddressing:
+    """Filter 7: directed messages notify only the recipient (observable, not notifiable).
+
+    A message carrying a non-empty ``recipient`` that is NOT this endpoint must
+    not wake the agent (no queue event) — but it is deliberately NOT hidden: it
+    stays on disk and remains readable via ``check_messages``. A broadcast
+    (``recipient`` None) or a message directed AT this endpoint notifies normally.
+    """
+
+    @staticmethod
+    def _write_directed(ch: Channel, *, recipient: str | None) -> None:
+        stem = make_message_filename(
+            datetime(2099, 1, 1, tzinfo=timezone.utc)
+        ).removesuffix(".json")
+        msg = new_message(
+            id=stem,
+            channel=ch.name,
+            instance_id=_PEER_INSTANCE,
+            sender=_PEER_SENDER,
+            body="directed",
+            recipient=recipient,
+        )
+        write_message(ch.path, msg)
+
+    @pytest.mark.asyncio
+    async def test_directed_elsewhere_is_not_notified(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        ch = make_channel(tmp_letterbox_home, name="ch01")
+        queue: asyncio.Queue[WatcherEvent] = asyncio.Queue()
+        w = Watcher(
+            ch,
+            self_sender=_SELF_SENDER,
+            self_instance_id=_SELF_INSTANCE,
+            queue=queue,
+        )
+        await w.start()
+        try:
+            # peer → claude-c; we are claude-a, so no 📬 for us.
+            self._write_directed(ch, recipient="claude-c")
+            with pytest.raises(TimeoutError):
+                await wait_for(lambda: queue.qsize() > 0, timeout=0.8)
+        finally:
+            await w.stop()
+
+    @pytest.mark.asyncio
+    async def test_directed_at_me_is_notified(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        ch = make_channel(tmp_letterbox_home, name="ch01")
+        queue: asyncio.Queue[WatcherEvent] = asyncio.Queue()
+        w = Watcher(
+            ch,
+            self_sender=_SELF_SENDER,
+            self_instance_id=_SELF_INSTANCE,
+            queue=queue,
+        )
+        await w.start()
+        try:
+            self._write_directed(ch, recipient=_SELF_SENDER)
+            await wait_for(lambda: queue.qsize() > 0, timeout=2.0)
+            assert queue.qsize() == 1
+        finally:
+            await w.stop()
+
+    @pytest.mark.asyncio
+    async def test_broadcast_is_notified(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        ch = make_channel(tmp_letterbox_home, name="ch01")
+        queue: asyncio.Queue[WatcherEvent] = asyncio.Queue()
+        w = Watcher(
+            ch,
+            self_sender=_SELF_SENDER,
+            self_instance_id=_SELF_INSTANCE,
+            queue=queue,
+        )
+        await w.start()
+        try:
+            self._write_directed(ch, recipient=None)
+            await wait_for(lambda: queue.qsize() > 0, timeout=2.0)
+            assert queue.qsize() == 1
+        finally:
+            await w.stop()

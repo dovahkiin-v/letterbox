@@ -696,12 +696,36 @@ class TestSendMessage:
         assert loaded.sender == "claude"
         assert loaded.instance_id == "lb-launch-1"
 
-    def test_recipient_is_null(self, tmp_letterbox_home: Path) -> None:
-        """K4 — recipient stays None in v1 (channel.recipient_label "" is
-        NOT threaded into the message).
+    def test_recipient_is_null_when_broadcast(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        """Default (no ``to``) is a broadcast: recipient stays None.
+
+        channel.recipient_label "" is NOT threaded into the message — the wire
+        recipient is driven solely by the ``to`` parameter.
         """
         ch, server = _real_channel_and_server(tmp_letterbox_home)
         result = _fn(server, "send_message")(body="x")
+        loaded = read_message(ch.path / f"{result['id']}.json")
+        assert isinstance(loaded, Message)
+        assert loaded.recipient is None
+
+    def test_to_sets_directed_recipient(self, tmp_letterbox_home: Path) -> None:
+        """``to`` directs the message: the wire recipient carries the label."""
+        ch, server = _real_channel_and_server(tmp_letterbox_home)
+        result = _fn(server, "send_message")(body="x", to="claude-commit")
+        loaded = read_message(ch.path / f"{result['id']}.json")
+        assert isinstance(loaded, Message)
+        assert loaded.recipient == "claude-commit"
+
+    def test_empty_to_normalizes_to_broadcast(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        """``to=""`` is treated as "not supplied" → broadcast (recipient None),
+        never a directed message addressed to the empty-string label.
+        """
+        ch, server = _real_channel_and_server(tmp_letterbox_home)
+        result = _fn(server, "send_message")(body="x", to="")
         loaded = read_message(ch.path / f"{result['id']}.json")
         assert isinstance(loaded, Message)
         assert loaded.recipient is None
@@ -1276,7 +1300,25 @@ class TestChannelInfo:
             "peer": None,
             "peer_has_spoken": False,
             "last_peer_activity": None,
+            # No launcher ran in this test, so no pid-locks exist for the channel.
+            "participants": [],
         }
+
+    def test_participants_reflects_live_locks(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        # channel_info surfaces who is RUNNING on the channel, read from the
+        # per-channel pid-locks (state_dir/locks/<channel>/<label>.pid). Plant
+        # two locks owned by this (alive) test process; both must appear, sorted.
+        _ch, server = _real_channel_and_server(
+            tmp_letterbox_home, channel="review", label="claude-review"
+        )
+        lock_dir = tmp_letterbox_home / "locks" / "review"
+        lock_dir.mkdir(parents=True)
+        (lock_dir / "claude-review.pid").write_text(f"{os.getpid()}\n")
+        (lock_dir / "claude-commit.pid").write_text(f"{os.getpid()}\n")
+        info = _fn(server, "channel_info")()
+        assert info["participants"] == ["claude-commit", "claude-review"]
 
     def test_peer_observed_from_traffic(self, tmp_letterbox_home: Path) -> None:
         # ADR-056: once the peer writes, channel_info reports WHO it is (sender

@@ -663,6 +663,7 @@ def _make_loop_session(
         mcp_config_path=tmp_path / "mcp.json",
         notification_template=template,
         cwd=tmp_path,
+        pid_lock_path=tmp_path / "lock.pid",
     )
 
 

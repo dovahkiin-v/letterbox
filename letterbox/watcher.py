@@ -518,6 +518,16 @@ class Watcher:
         if _is_own_write(result, self._self_sender, self._self_instance_id):
             return
 
+        # Filter 7: directed-elsewhere suppression (observable, not notifiable).
+        # A message carrying a non-empty ``recipient`` that is NOT us is a
+        # directed sub-dialogue between two other participants. We deliberately
+        # do NOT wake the agent for it — but we also do NOT hide it: it stays on
+        # disk and remains visible via ``check_messages`` (the read path applies
+        # no recipient filter). A broadcast (``recipient`` None/empty) or a
+        # message directed AT us falls through and notifies as normal.
+        if result.recipient and result.recipient != self._self_sender:
+            return
+
         # Shape the queue payload from trusted-context values only
         # (Vision §6.4 / §13.3). No field is sourced from `result`'s
         # peer-controlled payload.

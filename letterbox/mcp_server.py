@@ -22,6 +22,7 @@ from letterbox.channel import (
     list_channels as _list_channels,
 )
 from letterbox.config import load_config
+from letterbox.locks import list_live_participants
 from letterbox.protocol import (
     Message,
     is_valid_message_filename,
@@ -340,19 +341,30 @@ def _build_server(
             raise RuntimeError(_NOT_BRIDGED_DETAIL)
 
     @server.tool()
-    def send_message(body: str, in_reply_to: str | None = None) -> dict:
+    def send_message(
+        body: str, to: str | None = None, in_reply_to: str | None = None
+    ) -> dict:
         """Write a message to the current channel and return its message id.
 
-        The agent does NOT pass sender or recipient — those are populated
-        server-side from the launch identity (§3.2). Bodies over 5 MB are
-        rejected with MessageTooLarge before any disk I/O. Errors if there is
-        no active bridge — call channel_info first if unsure.
+        Leave ``to`` unset to broadcast — every participant on the channel is
+        notified (📬) and sees it. Set ``to`` to a participant's label (see
+        ``channel_info`` → ``participants``) to direct the message: only that
+        participant gets the 📬 notification, while everyone else can still read
+        it via ``check_messages`` (observable, but not notified). Directed
+        addressing is by convention, not privacy — the message lives in the
+        shared channel like any other (§13.3).
+
+        The agent does NOT pass sender — that is populated server-side from the
+        launch identity (§3.2). Bodies over 5 MB are rejected with
+        MessageTooLarge before any disk I/O. Errors if there is no active
+        bridge — call channel_info first if unsure.
         """
         _require_bridge()
-        # K4 — identity is server-side: sender from the launcher-resolved
-        # channel handle, instance_id from the captured launch id. The
-        # signature has no identity parameter, so agent-supplied identity
-        # is structurally impossible. recipient stays None (v1, §3.2).
+        # K4 — sender identity is server-side (from the launcher-resolved
+        # channel handle); the signature has no sender parameter, so a spoofed
+        # sender is structurally impossible. ``to`` sets the recipient label —
+        # an empty string normalizes to None (broadcast), so ``to=""`` never
+        # shadows a real label.
         msg_id = make_message_filename().removesuffix(".json")  # stem, no .json (G1)
         msg = new_message(
             id=msg_id,
@@ -361,6 +373,7 @@ def _build_server(
             sender=channel.sender_label,
             body=body,
             in_reply_to=in_reply_to,
+            recipient=(to or None),
         )
         # K3 — write_message encodes first, so MessageTooLarge propagates
         # before any .tmp is created; no pre-check, no catch-and-wrap.
@@ -502,10 +515,14 @@ def _build_server(
           telling the agent what a human must do; the messaging tools will
           error until then.
         * When ``true``: ``channel`` and ``sender`` (your identity); ``unread``
-          (your unread peer count); ``peer`` (who the peer is, observed from its
-          most recent message — ``null`` if it has never spoken);
-          ``peer_has_spoken``; and ``last_peer_activity`` (when, ISO-8601 — your
-          liveness signal: 90 s ago vs 3 days ago vs never).
+          (your unread peer count); ``peer`` (who last spoke, observed from the
+          most recent message — ``null`` if no one else has spoken);
+          ``peer_has_spoken``; ``last_peer_activity`` (when, ISO-8601 — your
+          liveness signal: 90 s ago vs 3 days ago vs never); and
+          ``participants`` (every label currently running on this channel,
+          *including yourself* and anyone who has launched but not yet spoken —
+          this is "who is in the room", the set you can direct a message to via
+          ``send_message(to=...)``).
         """
         if channel is None:
             # Dormant (ADR-056): no active bridge. Honest, actionable state —
@@ -515,7 +532,10 @@ def _build_server(
         # this closure). All values server-computed (§13.3): identity from the
         # launcher-resolved channel handle; unread/peer from the filesystem.
         # ``peer`` is the observed peer (sender of the latest peer message) —
-        # more useful than v1's always-"" recipient_label.
+        # more useful than v1's always-"" recipient_label. ``participants`` is
+        # derived from the live pid-locks (who is RUNNING), not from message
+        # history (who has SPOKEN) — so it surfaces a silent lurker too, the
+        # signal you need to address a directed message before anyone replies.
         info = _channel_info(channel, self_instance_id=instance_id)
         return {
             "bridged": True,
@@ -525,6 +545,11 @@ def _build_server(
             "peer": info.peer_label,
             "peer_has_spoken": info.peer_label is not None,
             "last_peer_activity": info.last_peer_activity,
+            # state_dir derived the same way list_channels does (channel.path is
+            # state_dir/channels/<name>); channel is non-None past the guard.
+            "participants": list_live_participants(
+                channel.path.parent.parent, channel.name
+            ),
         }
 
     return server
