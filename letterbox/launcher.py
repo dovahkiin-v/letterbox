@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from letterbox.adapters.pty_common import PTYHandle
 
 __all__ = [
+    "AlreadyRunningError",
     "LauncherSession",
     "generate_instance_id",
     "resolve_sender_label",
@@ -65,6 +66,77 @@ _LOGGER = logging.getLogger("letterbox.launcher")
 # keeps the waiter's ``await asyncio.sleep`` a clean cancellation point — unlike
 # ``to_thread(process.wait)``, which would linger past a ``task.cancel()``.
 _PROCESS_POLL_INTERVAL: float = 0.1
+
+
+class AlreadyRunningError(Exception):
+    """Raised when an instance with the same sender label is already running."""
+
+
+def _pid_lock_path(state_dir: Path, sender_label: str) -> Path:
+    """Return the canonical path for a sender label's pid lock file."""
+    return state_dir / "locks" / f"{sender_label}.pid"
+
+
+def _claim_pid_lock(
+    state_dir: Path,
+    sender_label: str,
+    harness_name: str,
+    channel_name: str,
+) -> Path:
+    """Claim a pid lock for *sender_label*, raising AlreadyRunningError if alive.
+
+    Creates ``state_dir/locks/`` on first use. Overwrites a stale lock (dead
+    pid) silently. The returned path must be released via :func:`_release_pid_lock`
+    when the session ends.
+
+    Args:
+        state_dir: The resolved letterbox state directory.
+        sender_label: The resolved identity label being claimed.
+        harness_name: Used only in the error hint message.
+        channel_name: Used only in the error hint message.
+
+    Returns:
+        The path of the lock file (now containing this process's pid).
+
+    Raises:
+        AlreadyRunningError: If a process holding the lock is still alive.
+    """
+    lock_path = _pid_lock_path(state_dir, sender_label)
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    if lock_path.exists():
+        try:
+            existing_pid = int(lock_path.read_text().strip())
+            os.kill(existing_pid, 0)
+        except (ValueError, ProcessLookupError):
+            pass  # unreadable or dead — stale lock, proceed
+        except PermissionError:
+            # EPERM: process exists (different owner); treat as alive
+            existing_pid_str = lock_path.read_text().strip()
+            raise AlreadyRunningError(
+                f"{sender_label!r} is already running (pid {existing_pid_str}).\n"
+                f"Use a different name to run a second instance, e.g.:\n"
+                f"  letterbox {harness_name} --channel {channel_name} --as {sender_label}-2"
+            ) from None
+        else:
+            raise AlreadyRunningError(
+                f"{sender_label!r} is already running (pid {existing_pid}).\n"
+                f"Use a different name to run a second instance, e.g.:\n"
+                f"  letterbox {harness_name} --channel {channel_name} --as {sender_label}-2"
+            )
+
+    lock_path.write_text(f"{os.getpid()}\n")
+    return lock_path
+
+
+def _release_pid_lock(lock_path: Path) -> None:
+    """Remove *lock_path* silently; ignores missing file (idempotent teardown).
+
+    Args:
+        lock_path: The path returned by :func:`_claim_pid_lock`.
+    """
+    with contextlib.suppress(FileNotFoundError):
+        lock_path.unlink()
 
 
 def generate_instance_id() -> str:
@@ -138,6 +210,8 @@ class LauncherSession:
             its own settings rather than a ``--mcp-config`` flag (ADR-054).
         notification_template: The config-resolved, validated template 8b renders.
         cwd: The working directory the harness was spawned in.
+        pid_lock_path: The pid lock file path claimed at startup; released by
+            ``run_launcher``'s ``finally`` (duplicate-instance guard).
     """
 
     harness_name: str
@@ -152,6 +226,7 @@ class LauncherSession:
     mcp_config_path: "Path | None"
     notification_template: str
     cwd: Path
+    pid_lock_path: Path
 
 
 async def setup_launcher(
@@ -226,6 +301,10 @@ async def setup_launcher(
         # --global` (cli._handle_init).
         state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(state_dir, 0o700)
+
+    # (1.5) Duplicate-identity guard — fail before spawn if the same sender label
+    #     is already running. Stale locks (dead pid) are silently overwritten.
+    pid_lock_path = _claim_pid_lock(state_dir, sender_label, harness_name, channel_name)
 
     # (2) Adapter availability — bootstrap the registry, then resolve. An unknown
     #     harness raises KeyError listing the registered names (get_adapter).
@@ -326,11 +405,13 @@ async def setup_launcher(
         )
         await watcher.start()
     except BaseException:
-        # Assembly rollback (K5 / L6): no leaked PTY child, no orphaned temp file.
+        # Assembly rollback (K5 / L6): no leaked PTY child, no orphaned temp file,
+        # no orphaned pid lock.
         if handle is not None:
             await adapter.teardown(handle)
         if mcp_config_path is not None:
             cleanup_mcp_config(mcp_config_path)
+        _release_pid_lock(pid_lock_path)
         raise
 
     return LauncherSession(
@@ -346,6 +427,7 @@ async def setup_launcher(
         mcp_config_path=mcp_config_path,
         notification_template=notification_template,
         cwd=cwd,
+        pid_lock_path=pid_lock_path,
     )
 
 
@@ -912,6 +994,7 @@ async def run_launcher(
             loop.remove_signal_handler(sig)
         if bridge is not None:
             bridge.stop()
+        _release_pid_lock(session.pid_lock_path)
         await _teardown_runtime(
             session, racers, teardown_timeout=teardown_timeout
         )

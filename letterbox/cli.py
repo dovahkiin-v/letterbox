@@ -380,14 +380,16 @@ def _handle_harness(
         KeyError,
         channel.StatePermissionsError,
         notifications.NotificationTemplateError,
+        launcher.AlreadyRunningError,
     ) as exc:
         # The harness-path error-vector contract (ADR-053, extending ADR-050/051).
-        # These four types are the EXPECTED pre-spawn startup failures from
+        # These five types are the EXPECTED pre-spawn startup failures from
         # ``run_launcher``'s validation chain (launcher.py §K4): harness command
         # not on PATH (``FileNotFoundError``); unknown adapter / missing
         # ``[harness.<name>]`` block (``KeyError``); an existing world-accessible
         # state dir (``StatePermissionsError``); an invalid configured notification
-        # template (``NotificationTemplateError``). Render each as a one-line stderr
+        # template (``NotificationTemplateError``); a duplicate sender label already
+        # running (``AlreadyRunningError``). Render each as a one-line stderr
         # vector + exit 1 (Framework P3) — never a traceback wall.
         #
         # Scoped to the HARNESS dispatch, not the ``main()`` boundary: unlike
