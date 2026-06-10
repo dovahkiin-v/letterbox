@@ -1,17 +1,18 @@
 ---
 name: letterbox
 description: >-
-  Establish and use a letterbox bridge — a file-based, real-time channel between
-  two terminal AI agents (Claude Code, Gemini CLI, Antigravity). Use this when
-  you need to talk to a peer agent, check who is on a channel, or set up the
-  comms wiring yourself (no human in the loop) for any of the three harnesses.
+  Talk on a live letterbox bridge — a file-based, real-time channel between
+  terminal AI agents (Claude Code, Gemini CLI, Antigravity). Use this when you
+  need to check who is on a channel, read peer messages, or send (broadcast or
+  directed). For the one-time wiring to make a harness bridge-capable, use the
+  `letterbox-setup` skill instead.
 ---
 
 # Letterbox — agent operating guide
 
-Letterbox lets two terminal coding agents hold a real-time conversation by
-passing JSON message files through a shared directory. When one agent sends, a
-`📬` notification is injected into the other's terminal and wakes it to read and
+Letterbox lets terminal coding agents hold a real-time conversation by passing
+JSON message files through a shared directory. When one agent sends, a `📬`
+notification is injected into the others' terminals and wakes them to read and
 reply. There is no network and no server — just files under
 `~/.letterbox/channels/<channel>/` and the OS's atomic rename.
 
@@ -19,7 +20,8 @@ When a bridge is **active**, you have a `letterbox` MCP server with these tools:
 `send_message`, `check_latest_message`, `check_messages`, `acknowledge`,
 `list_channels`, `channel_info`. When you have the tools but **no** active
 bridge (a plain session), the server is *dormant*: the tools exist but the
-messaging ones fail with a clear message until a bridge is launched.
+messaging ones fail with a clear message until a bridge is launched. (To create
+a bridge or wire a new harness, see the **`letterbox-setup`** skill.)
 
 ## 1. First: am I actually bridged?
 
@@ -73,98 +75,21 @@ start** — on launch your read marker jumps to the newest message on disk, so y
 won't be flooded with a previous session's backlog. The history is still there;
 reach it deliberately with `check_messages(since_id=...)`.
 
-## 3. Setting up comms yourself (no human in the loop)
+## 3. Gotchas
 
-A bridge is two launches — one per side, same channel:
-
-```
-letterbox <harness> --channel <name> --as <label>
-```
-
-Run the peer's side with `letterbox <harness>` (it spawns the harness, watches
-the channel, and injects notifications). The one prerequisite is that the target
-harness must have the letterbox MCP server **registered** so its agent gets the
-tools. That registration is one-time per harness, and it differs by harness.
-
-**Important:** you cannot add MCP tools to your *own already-running* session.
-Registration takes effect on the **next launch** of that harness. So to bring up
-a peer: make sure the wiring below exists for the peer's harness, then spawn
-`letterbox <harness> --channel <name> --as <peer-label>` for it.
-
-Two values you'll reuse:
-- the **absolute** path to the `letterbox` binary (`readlink -f "$(command -v letterbox)"`),
-- the launch directory must be **trusted** by Gemini/Antigravity (they otherwise
-  pop a blocking "trust this folder?" prompt that stalls automation).
-
-### Claude Code — no wiring needed
-
-`letterbox claude` auto-generates a temporary MCP config and passes
-`--mcp-config` to `claude`. There is no settings file to edit. Just launch:
-
-```
-letterbox claude --channel <name> --as <label>
-```
-
-### Gemini CLI — settings entry + folder trust
-
-1. Ensure `~/.gemini/settings.json` contains a `letterbox` MCP server under
-   `mcpServers` (create the file / key if missing; keep `args` exactly `["mcp"]`
-   — channel-agnostic, the launcher passes the channel by env):
-
-   ```json
-   {
-     "mcpServers": {
-       "letterbox": { "command": "/absolute/path/to/letterbox", "args": ["mcp"] }
-     }
-   }
-   ```
-
-2. Ensure the launch directory (or a parent) is trusted in
-   `~/.gemini/trustedFolders.json`:
-
-   ```json
-   { "/home/<user>/projects": "TRUST_PARENT" }
-   ```
-
-   `TRUST_FOLDER` = that exact dir; `TRUST_PARENT` = it and everything beneath.
-   Do **not** use Gemini's `--skip-trust` flag to dodge this — it crashes even in
-   trusted dirs. Trust the folder instead.
-
-3. Launch: `letterbox gemini --channel <name> --as <label>`.
-
-### Antigravity (`agy`) — install a local plugin + workspace trust
-
-`agy` loads MCP servers from **plugins**. Create a tiny plugin directory (two
-JSON files) and install it:
-
-```bash
-LB="$(readlink -f "$(command -v letterbox)")"
-DIR=~/.letterbox/agy-plugin/letterbox
-mkdir -p "$DIR"
-printf '{ "name": "letterbox", "version": "1.0.0", "description": "Letterbox comms bridge." }\n' > "$DIR/plugin.json"
-printf '{ "mcpServers": { "letterbox": { "command": "%s", "args": ["mcp"] } } }\n' "$LB" > "$DIR/mcp_config.json"
-agy plugin install "$DIR"     # expect: "mcpServers : 1 processed"
-agy plugin list               # confirm letterbox is imported
-```
-
-The MCP-server file MUST be named `mcp_config.json` (a `.mcp.json` is ignored).
-Also ensure the launch directory is in `trustedWorkspaces` in
-`~/.gemini/antigravity-cli/settings.json`. Then launch:
-`letterbox agy --channel <name> --as <label>` (`letterbox antigravity …` is the
-same thing). To remove later: `agy plugin uninstall letterbox`.
-
-## 4. Gotchas
-
-- **Never run `letterbox mcp` yourself.** It is the stdio MCP server the harness
-  spawns. Run by hand it just tells you so and exits.
-- **Autonomous launch flags are deliberate.** `letterbox claude` adds
-  `--dangerously-skip-permissions` and `letterbox gemini` adds `--yolo`, because
-  an injected message cannot wake an agent blocked on an approval prompt.
-- **The channel is passed by environment, not baked into config.** The launcher
-  exports `LETTERBOX_CHANNEL`, `LETTERBOX_SENDER`, `LETTERBOX_INSTANCE_ID`; the
-  MCP server reads them. That is why every config entry above is
-  channel-agnostic and you never edit it per channel.
+- **Version skew — phantom duplicates or stray 📬.** If `participants` is missing
+  someone you know is active, or two sessions seem to share one label, or you get
+  pinged for messages directed at *someone else*, the channel almost certainly
+  has a **stale session** — one launched before a letterbox upgrade. The guards
+  live in the launcher process, so an old session predates them. The cure is to
+  **relaunch the stale sessions** (see the `letterbox-setup` skill, "Upgrades").
+  This is not a bug in the current code; it is mixed-version launchers.
 - **Files are the source of truth.** A channel is just a directory; you can
   inspect it directly (`~/.letterbox/channels/<name>/msg-*.json`). If a harness
   somehow lacks the tools, you can still read/write those files by hand — but
   the tools are the intended path.
+- **Never run `letterbox mcp` yourself.** It is the stdio MCP server the harness
+  spawns, not a command you invoke. Run by hand it just tells you so and exits.
+
+For setup, per-harness wiring, the duplicate-label rule, and upgrade procedure,
+see the **`letterbox-setup`** skill.

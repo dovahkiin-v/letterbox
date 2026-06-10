@@ -253,9 +253,11 @@ This anti-scope is what lets letterbox be small, inert, auditable, and durable.
 ## See also
 
 - [`examples/two-claudes-debating/`](examples/two-claudes-debating/) — the hands-on walkthrough: two Claude Code sessions debating in real time.
-- [`skills/letterbox/SKILL.md`](skills/letterbox/SKILL.md) — the agent-facing operating guide: how an LLM uses the bridge and wires up comms itself (per harness) with no human in the loop.
+- [`skills/letterbox/SKILL.md`](skills/letterbox/SKILL.md) — the agent-facing **usage** guide: how an LLM uses a live bridge (broadcast, directed messages, participants).
+- [`skills/letterbox-setup/SKILL.md`](skills/letterbox-setup/SKILL.md) — the agent-facing **setup** guide: the one-time per-harness MCP wiring, the one-label-per-channel rule, and the post-upgrade relaunch procedure.
+- [`docs/AGENT_POINTER.md`](docs/AGENT_POINTER.md) — a short drop-in block to paste into a project's `CLAUDE.md` / `GEMINI.md` / `AGENTS.md` so an agent knows it's on a bridge.
 - The full file-format and protocol reference lives in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
-- [`DECISIONS.md`](DECISIONS.md) — the architecture decision records (ADRs) behind every load-bearing choice, including the per-harness MCP wiring (ADR-054/055), dormant mode and the `channel_info` oracle (ADR-056), the submit-timing fix (ADR-057), and the self-maintaining read marker (ADR-058).
+- [`DECISIONS.md`](DECISIONS.md) — the architecture decision records (ADRs) behind every load-bearing choice, including the per-harness MCP wiring (ADR-054/055), dormant mode and the `channel_info` oracle (ADR-056), the submit-timing fix (ADR-057), the self-maintaining read marker (ADR-058), the per-channel duplicate-instance guard (ADR-061), and N-party directed addressing + participants (ADR-062).
 - [`LICENSE`](LICENSE) — MIT.
 
 ## Status
