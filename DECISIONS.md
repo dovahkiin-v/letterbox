@@ -4,6 +4,16 @@ Architectural Decision Records (ADRs). **Newest at top**, oldest at bottom. ADR 
 
 ---
 
+## ADR-063 — Claude Code now needs the delayed-terminator write too: a 2026-06-10 update added a fast-return submission gate
+
+**Date:** 2026-06-10
+**Context:** ADR-057 established the delayed-terminator write for TUIs that gate submission on keystroke timing (Gemini, Antigravity at `terminator_delay = 0.1`), and explicitly carved Claude Code out: it was "verified live" to submit on a combined `b"text\r"` write, so `ClaudeAdapter.terminator_delay` stayed at the base default `0.0`. A Claude Code update shipped 2026-06-10 changed this. With the old combined write, an injected 📬 notification now **lands in Claude Code's input box but does not submit** — the `\r` arriving in the same burst as the text is swallowed as a newline-in-box rather than a discrete Enter, exactly the failure mode ADR-057 documented for Gemini's `KeypressContext`. Confirmed live on channel `demo-2`: directed messages into a Claude Code participant appeared and hung; the same messages into Gemini (already delayed) submitted fine.
+**Decision:** Set `ClaudeAdapter.terminator_delay = 0.1`, joining Gemini and Antigravity on the delayed-terminator path: write the text, wait past the harness's fast-return window, then write the `\r` as a separate, discrete Enter. No new mechanism — this is a config flip on the existing ADR-057 substrate. The contract test (`test_adapters_claude.py`) is updated to assert `0.1`.
+**Rationale:** The combined-write path was only ever a per-harness empirical fact, never an invariant — ADR-057 already treated the terminator strategy as a tunable property of each harness's current TUI, not a fixed truth. When the harness changed its submission gate, the right response was to flip the same knob that already fixed the other two, not to invent a new path. `0.1` is the proven value across the other two adapters; if a future Claude Code widens its window past 100 ms it can be raised, but it held in live testing. Diagnosis note for future readers: the symptom is harness-version-coupled, so a recurrence after a Claude Code update should be checked against this ADR before suspecting the injection or watcher layers (which are unchanged).
+**Supersedes:** The Claude-specific carve-out in ADR-057 (Claude keeps the combined-write path / `terminator_delay = 0.0`). The rest of ADR-057 — the delayed-terminator mechanism and the Gemini/Antigravity values — stands unchanged.
+
+---
+
 ## ADR-062 — A channel is N-party: directed messages are *observable but not notified*, and `channel_info` reports live `participants`
 
 **Date:** 2026-06-10

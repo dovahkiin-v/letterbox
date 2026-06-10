@@ -98,11 +98,12 @@ class TestClaudeAdapterConfig:
         assert ClaudeAdapter.notification_template == _VISION_TEMPLATE
         # line_terminator is the inherited base default — NOT overridden.
         assert ClaudeAdapter.line_terminator == b"\r"
-        # Claude wires letterbox via --mcp-config (ADR-054) and submits on a
-        # combined write — no terminator delay (ADR-057). Both base defaults,
-        # set explicitly.
+        # Claude wires letterbox via --mcp-config (ADR-054). A 2026-06-10 Claude
+        # Code update added a fast-return submission gate, so Claude now needs the
+        # delayed-terminator write like Gemini/Antigravity (ADR-057, ADR-063) —
+        # the combined-write path no longer submits.
         assert ClaudeAdapter.mcp_config_via_flag is True
-        assert ClaudeAdapter.terminator_delay == 0.0
+        assert ClaudeAdapter.terminator_delay == 0.1
 
     def test_registered_under_claude(self) -> None:
         # Module-level @register_adapter fired at import; the live registry

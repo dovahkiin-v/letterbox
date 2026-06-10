@@ -42,7 +42,11 @@ class ClaudeAdapter(Adapter):
     # Claude Code supports ``--mcp-config <path>``, so letterbox wires its MCP
     # server self-contained per launch (the base default). ADR-054.
     mcp_config_via_flag = True
-    # Claude Code submits on a combined ``b"text\r"`` write (verified live), so
-    # it keeps the single-write path (no terminator delay) — the base default.
-    # ADR-057.
-    terminator_delay = 0.0
+    # Claude Code *used* to submit on a combined ``b"text\r"`` write, but a
+    # 2026-06-10 Claude Code update added a fast-return submission gate (the same
+    # class of behaviour as Gemini's ``KeypressContext`` — a ``\r`` arriving in the
+    # same burst as the text is treated as a newline-in-box, not a submit). So
+    # Claude now needs the SEPARATE, delayed terminator write like Gemini and
+    # Antigravity: write the text, wait past the fast-return window, then write the
+    # ``\r`` so it registers as a discrete Enter. ADR-057, ADR-063.
+    terminator_delay = 0.1
