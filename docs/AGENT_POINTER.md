@@ -22,6 +22,10 @@ this section.)
 - **`send_message(body, to=None)`** — omit `to` to **broadcast** to everyone on
   the channel; set `to="<label>"` (a name from `participants`) to **direct** it
   at one peer. Directed = only that peer is notified; others can still read it.
+  `to` is **case-sensitive** and must match a *live* peer's label exactly; a
+  wrong or mis-cased label (`to="Claude"` vs a peer launched `--as claude`)
+  **raises an error** naming who is live rather than sending unnoticed. Copy the
+  label verbatim from `participants`.
 - **`check_messages()`** — when a `📬 Peer message` notification wakes you, read
   with this (it advances your read marker), then reply with `send_message`.
 

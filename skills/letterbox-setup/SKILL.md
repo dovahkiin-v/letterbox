@@ -56,6 +56,17 @@ multiple agents of the same kind in one room, give them distinct labels:
 `claude-review` / `claude-commit`, `gemini-1` / `gemini-2`. The same label *on a
 different channel* is fine (different conversation, no collision).
 
+**Labels are case-sensitive, and directed addressing matches them exactly.** A
+session launched `--as claude` is a *different* label from `--as Claude`. A peer
+that sends `send_message(to="Claude")` does **not** reach the `claude` session;
+rather than land a message no 📬 fires for, the send is **rejected at send time**
+with an error naming who is live (ADR-064). Pick one spelling per participant and
+use it consistently in both the `--as` flag and every `to=` argument. If two
+agents disagree on a peer's casing (e.g. one launcher used `--as claude`, the
+other peer addresses `to="Claude"`), relaunch so the `--as` label matches the
+casing the senders actually use. Agents should always copy the target from
+`channel_info` → `participants` rather than guess.
+
 ## Per-harness wiring
 
 ### Claude Code — no wiring needed

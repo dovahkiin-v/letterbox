@@ -32,7 +32,66 @@ from letterbox.protocol import (
     write_message,
 )
 
-__all__ = ["run"]
+__all__ = ["run", "UnknownRecipientError"]
+
+
+class UnknownRecipientError(Exception):
+    """Raised when ``send_message(to=…)`` names a label that is not a live peer.
+
+    Directed addressing controls *attention* (ADR-062): the 📬 notification
+    fires only for the named recipient. If ``to`` names a label that is not a
+    live participant on the channel — a typo, a wrong case (``to="Claude"`` vs a
+    peer launched ``--as claude``), the sender's own label, or a peer that is
+    not currently running — the message would land in the directory but notify
+    no one. This exception turns that silent miss into a loud, actionable error
+    at send time, before any disk write (ADR-064).
+    """
+
+
+def _assert_recipient_live(channel: Channel, recipient: str) -> None:
+    """Reject a directed ``send_message`` whose target cannot be notified.
+
+    Validates ``recipient`` against the channel's live pid-locks — the same
+    source ``channel_info`` reports as ``participants`` — and against the
+    sender's own label. A mismatch raises :class:`UnknownRecipientError` with a
+    roster of who is live and a case-correction hint when the only difference is
+    capitalization. Broadcast (no recipient) never reaches this function.
+
+    Args:
+        channel: The active channel handle (identity + path for the lock scan).
+        recipient: The non-empty ``to`` label to validate.
+
+    Returns:
+        None.
+
+    Raises:
+        UnknownRecipientError: If ``recipient`` is the sender's own label, or is
+            not currently running on the channel.
+    """
+    if recipient == channel.sender_label:
+        raise UnknownRecipientError(
+            f"to={recipient!r} is your own label — a message directed at "
+            "yourself notifies no one (your own writes are never echoed back). "
+            "Omit `to` to broadcast to the channel."
+        )
+    # state_dir derived as channel_info does it: channel.path is
+    # state_dir/channels/<name>, so two parents up is the state dir.
+    participants = list_live_participants(channel.path.parent.parent, channel.name)
+    others = [p for p in participants if p != channel.sender_label]
+    if recipient in others:
+        return
+    case_match = next((p for p in others if p.lower() == recipient.lower()), None)
+    hint = (
+        f" Labels are case-sensitive — did you mean {case_match!r}?"
+        if case_match is not None
+        else ""
+    )
+    roster = ", ".join(others) if others else "(no other participant is live)"
+    raise UnknownRecipientError(
+        f"No live participant {recipient!r} on channel {channel.name!r}.{hint} "
+        f"Currently live: {roster}. Address one of these exactly, or omit `to` "
+        "to broadcast."
+    )
 
 # The agent-facing explanation surfaced both as the dormant ``channel_info``
 # detail and as the error every messaging tool raises when called with no
@@ -354,6 +413,16 @@ def _build_server(
         addressing is by convention, not privacy — the message lives in the
         shared channel like any other (§13.3).
 
+        ``to`` is matched against the channel's **live participants** by exact
+        label, **capitalization included**. If it names no live participant —
+        whether a typo, a wrong case (``to="Claude"`` vs a peer launched
+        ``--as claude``), or a peer that is not currently running — the call
+        raises ``UnknownRecipientError`` naming who *is* live, instead of writing
+        a message no one would be notified about (ADR-064). Directing a message at
+        your own label is likewise refused (own writes are never echoed back, so
+        it would notify no one). Copy the target verbatim from ``channel_info`` →
+        ``participants``; never guess its case.
+
         The agent does NOT pass sender — that is populated server-side from the
         launch identity (§3.2). Bodies over 5 MB are rejected with
         MessageTooLarge before any disk I/O. Errors if there is no active
@@ -365,6 +434,13 @@ def _build_server(
         # sender is structurally impossible. ``to`` sets the recipient label —
         # an empty string normalizes to None (broadcast), so ``to=""`` never
         # shadows a real label.
+        recipient = to or None
+        # ADR-064 — fail loud at the boundary: a directed message to a label that
+        # is not live would notify no one (the watcher's Filter 7 silently drops
+        # the 📬). Validate before any disk write; broadcast (recipient None) is
+        # for everyone and needs no liveness check.
+        if recipient is not None:
+            _assert_recipient_live(channel, recipient)
         msg_id = make_message_filename().removesuffix(".json")  # stem, no .json (G1)
         msg = new_message(
             id=msg_id,
@@ -373,7 +449,7 @@ def _build_server(
             sender=channel.sender_label,
             body=body,
             in_reply_to=in_reply_to,
-            recipient=(to or None),
+            recipient=recipient,
         )
         # K3 — write_message encodes first, so MessageTooLarge propagates
         # before any .tmp is created; no pre-check, no catch-and-wrap.

@@ -588,7 +588,7 @@ class TestRunShutdown:
 
 class TestPublicSurface:
     def test_public_exports(self) -> None:
-        assert mcp_server.__all__ == ["run"]
+        assert mcp_server.__all__ == ["run", "UnknownRecipientError"]
 
     def test_tier_header_preserved_verbatim(self) -> None:
         source_lines = inspect.getsource(mcp_server).splitlines()
@@ -625,6 +625,16 @@ def _fn(server: FastMCP, name: str):
     is pinned ``>=1.27,<1.28`` (ADR-029) so the layout is stable.
     """
     return server._tool_manager._tools[name].fn  # noqa: SLF001
+
+
+def _plant_live_lock(home: Path, *, channel: str, label: str) -> None:
+    """Plant a pid-lock owned by this (alive) test process so ``label`` reads as
+    a live participant on ``channel`` — the precondition for directing a message
+    at it (ADR-064 send-time validation; mirrors ``list_live_participants``).
+    """
+    lock_dir = home / "locks" / channel
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    (lock_dir / f"{label}.pid").write_text(f"{os.getpid()}\n")
 
 
 def _write_peer_message(
@@ -711,12 +721,76 @@ class TestSendMessage:
         assert loaded.recipient is None
 
     def test_to_sets_directed_recipient(self, tmp_letterbox_home: Path) -> None:
-        """``to`` directs the message: the wire recipient carries the label."""
-        ch, server = _real_channel_and_server(tmp_letterbox_home)
+        """``to`` directs the message: the wire recipient carries the label.
+
+        The target must be a live participant (ADR-064), so plant its pid-lock
+        first.
+        """
+        ch, server = _real_channel_and_server(tmp_letterbox_home, channel="review")
+        _plant_live_lock(tmp_letterbox_home, channel="review", label="claude-commit")
         result = _fn(server, "send_message")(body="x", to="claude-commit")
         loaded = read_message(ch.path / f"{result['id']}.json")
         assert isinstance(loaded, Message)
         assert loaded.recipient == "claude-commit"
+
+    def test_to_unknown_recipient_raises_before_write(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        """ADR-064 — directing at a label that is not live fails loud, names who
+        is live, and writes nothing to the channel.
+        """
+        ch, server = _real_channel_and_server(
+            tmp_letterbox_home, channel="review", label="claude"
+        )
+        _plant_live_lock(tmp_letterbox_home, channel="review", label="claude")
+        _plant_live_lock(tmp_letterbox_home, channel="review", label="gemini")
+        before = set(ch.path.glob("msg-*.json"))
+        with pytest.raises(mcp_server.UnknownRecipientError) as exc:
+            _fn(server, "send_message")(body="x", to="nobody")
+        # Roster names the live peer; the sender's own label is excluded.
+        assert "gemini" in str(exc.value)
+        assert "nobody" in str(exc.value)
+        # Nothing was written — the guard runs before any disk I/O.
+        assert set(ch.path.glob("msg-*.json")) == before
+
+    def test_to_wrong_case_raises_with_hint(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        """ADR-064 — a case-only mismatch (the original Antigravity bug) is
+        caught and the error suggests the correct casing.
+        """
+        _ch, server = _real_channel_and_server(
+            tmp_letterbox_home, channel="review", label="gemini"
+        )
+        _plant_live_lock(tmp_letterbox_home, channel="review", label="claude")
+        _plant_live_lock(tmp_letterbox_home, channel="review", label="gemini")
+        with pytest.raises(mcp_server.UnknownRecipientError) as exc:
+            _fn(server, "send_message")(body="x", to="Claude")
+        msg = str(exc.value)
+        assert "case-sensitive" in msg
+        assert "'claude'" in msg  # the suggested correct casing
+
+    def test_to_own_label_raises(self, tmp_letterbox_home: Path) -> None:
+        """ADR-064 — directing at your own label notifies no one (own writes are
+        never echoed back), so it is refused with a broadcast nudge.
+        """
+        _ch, server = _real_channel_and_server(
+            tmp_letterbox_home, channel="review", label="claude"
+        )
+        _plant_live_lock(tmp_letterbox_home, channel="review", label="claude")
+        with pytest.raises(mcp_server.UnknownRecipientError) as exc:
+            _fn(server, "send_message")(body="x", to="claude")
+        assert "your own label" in str(exc.value)
+
+    def test_broadcast_skips_liveness_validation(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        """A broadcast (no ``to``) is for everyone, present and future, so it
+        needs no live participant — it sends even on an empty channel.
+        """
+        ch, server = _real_channel_and_server(tmp_letterbox_home, channel="review")
+        result = _fn(server, "send_message")(body="x")  # no peers live at all
+        assert (ch.path / f"{result['id']}.json").is_file()
 
     def test_empty_to_normalizes_to_broadcast(
         self, tmp_letterbox_home: Path

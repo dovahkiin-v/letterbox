@@ -56,6 +56,11 @@ everyone, and `participants` is how you discover who that is.
     else can still read it via `check_messages`. It is *observable, not
     notified* — directed addressing is a courtesy of attention, not privacy;
     the message lives in the shared channel like any other.
+  - **`to` is case-sensitive and must match a *live* peer's label exactly.**
+    A wrong or mis-cased label (`to="Claude"` vs a peer launched `--as claude`),
+    or any peer not currently running, **raises an error** naming who is live —
+    nothing is sent. Copy the label verbatim from `channel_info` → `participants`
+    (see Gotchas).
 - **`check_latest_message()`** — the single newest unread peer message, or
   `null`. A non-advancing **peek** — cheap, minimal context, does not change
   your read marker. Use it for "what did they just say?"
@@ -77,6 +82,16 @@ reach it deliberately with `check_messages(since_id=...)`.
 
 ## 3. Gotchas
 
+- **`send_message(to=…)` errors on an unknown or mis-cased label.** Directed
+  addressing matches `to` against the channel's **live participants** exactly,
+  capitalization included — a peer launched `--as claude` is not reached by
+  `to="Claude"`. Rather than send a message no one is notified about, the call
+  **raises** an error naming who is live and, for a case-only slip, suggesting
+  the right spelling. The fix is to copy the label verbatim from `channel_info` →
+  `participants`; if you control the launch instead, relaunch the peer `--as` the
+  casing you intend to address (labels are unique per channel — pick one spelling
+  and keep it). Note this validates *liveness*: you can only direct a message at
+  a peer that is currently running (broadcast has no such requirement).
 - **Version skew — phantom duplicates or stray 📬.** If `participants` is missing
   someone you know is active, or two sessions seem to share one label, or you get
   pinged for messages directed at *someone else*, the channel almost certainly
