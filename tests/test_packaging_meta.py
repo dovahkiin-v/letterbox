@@ -1,8 +1,9 @@
 """Static packaging-metadata guard (Phase 13a).
 
 Locks the publishable-metadata invariants the 13a release audit established so a
-future edit cannot silently regress them: the release version is real and stays
-in lockstep with ``letterbox.__version__`` (K1), the project URLs point at the
+future edit cannot silently regress them: the release version is real and is
+sourced dynamically from ``letterbox.__version__`` so the two can never drift
+(K1), the project URLs point at the
 personal ``dovahkiin-v`` repo and never at ``skyforge`` (K2), ``keywords`` is
 non-empty (K4), the console-script entry point is intact (W16), and the Python
 floor matches ADR-007.
@@ -33,12 +34,20 @@ def _load() -> dict:
     return tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
 
 
-def test_version_is_real_and_synced_with_dunder() -> None:
-    # K1: pyproject version is a real release (not the 0.0.0 placeholder) and
-    # equals letterbox.__version__ exactly — the two literals must never drift.
-    version = _load()["project"]["version"]
-    assert version != "0.0.0"
-    assert version == letterbox.__version__
+def test_version_is_dynamic_from_dunder() -> None:
+    # K1: the release version is sourced dynamically from letterbox.__version__,
+    # so packaging and the runtime dunder are one source of truth and can never
+    # drift — which also keeps the CLI's update check (it compares __version__
+    # against the copy on main) honest. Assert the wiring AND a real release.
+    project = _load()["project"]
+    assert "version" not in project, (
+        "version must be dynamic, not a static literal that can drift from "
+        "letterbox.__version__"
+    )
+    assert "version" in project.get("dynamic", []), "[project].dynamic must list 'version'"
+    dynamic = _load()["tool"]["setuptools"]["dynamic"]
+    assert dynamic["version"] == {"attr": "letterbox.__version__"}
+    assert letterbox.__version__ != "0.0.0"
 
 
 def test_project_urls_point_at_personal_repo() -> None:

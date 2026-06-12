@@ -10,7 +10,7 @@
 
 *A small file-based comms protocol that lets two AI agents in separate terminals talk to each other in real time.*
 
-**Letterbox** lets two terminal coding agents — Claude Code, Gemini CLI, or Antigravity — hold a real-time conversation by passing message files through a shared directory. When one agent speaks, a `📬` notification is injected into the other's terminal and wakes it to read and reply. No network, no server, no shared memory: just JSON files in a folder and the OS's atomic-rename. It's the messaging layer that was built for an internal planning loop, extracted and frozen as a standalone artifact in 2026. If you've ever wanted two CLI agents to collaborate on a task without you copy-pasting between windows, this is for you. If you're looking for a maintained, evolving project — this is a frozen reference release, not a community project.
+**Letterbox** lets two terminal coding agents — Claude Code, Gemini CLI, or Antigravity — hold a real-time conversation by passing message files through a shared directory. When one agent speaks, a `📬` notification is injected into the other's terminal and wakes it to read and reply. No network, no server, no shared memory: just JSON files in a folder and the OS's atomic-rename. It's the messaging layer that was built for an internal planning loop, extracted into a standalone, versioned tool in 2026. If you've ever wanted two CLI agents to collaborate on a task without you copy-pasting between windows, this is for you. It gets the occasional update at the author's whim (the launcher tells you when a newer one is out) — but it's unsupported: no roadmap, no feature requests, not a community project.
 
 The bridge is genuinely cross-harness: **Claude on one side, Gemini on the other**, talking through the same channel, has been verified live. The one wrinkle is setup — Claude wires itself automatically, while Gemini and Antigravity load letterbox from their own settings. The [Setup](#setup-per-harness) section walks through both.
 
@@ -61,10 +61,10 @@ There is no daemon, no IPC, no background service. The filesystem *is* the coord
 
 ## Who it's NOT for
 
-- Anyone wanting a **hosted or networked** chat service — letterbox is filesystem-local and never touches the network.
+- Anyone wanting a **hosted or networked** chat service — the message protocol is filesystem-local and never touches the network. (The launcher makes one optional, best-effort version check at startup; disable it with `LETTERBOX_NO_UPDATE_CHECK=1`.)
 - Anyone wanting a **multi-user platform** — it's a point-to-point bridge between agents on one machine, not a many-user hub (see [Built for two](#built-for-two)).
 - **Windows-native** users — v1 is POSIX-only (see [What we don't support](#what-we-dont-support)).
-- Anyone wanting a **maintained community project** taking feature requests — this is a frozen reference artifact, not an evolving product.
+- Anyone wanting a **supported product** — letterbox is versioned and gets the occasional update at the author's whim (the launcher tells you when a newer one is out), but there's no roadmap, no SLA, and no commitment to take feature requests or keep maintaining it. Use it as-is; pull a newer version if it helps.
 
 ## Built for two
 
@@ -85,6 +85,16 @@ which letterbox           # note this absolute path; Gemini/Antigravity setup ne
 ```
 
 You also need the harness you're launching (`claude`, `gemini`, or `antigravity`) installed, on your `PATH`, and logged in. Letterbox launches it for you.
+
+### Updating
+
+Letterbox is versioned (`letterbox.__version__`, the single source of truth); since there's no PyPI release, the git `main` HEAD *is* the release. On a human-facing launch the CLI makes one best-effort check (at most once a day, cached under `~/.cache/letterbox/`) and prints a one-line notice if a newer version exists. To update:
+
+```bash
+pip install --upgrade "git+https://github.com/dovahkiin-v/letterbox"
+```
+
+This is the **only** network call letterbox ever makes — the messaging protocol stays fully local. It runs with a tight timeout and is fully fail-silent: if it can't reach GitHub it simply prints nothing and never delays your launch. It is never run for `letterbox mcp` (the agent's stdio server). Disable it entirely with `LETTERBOX_NO_UPDATE_CHECK=1`.
 
 ## Setup per harness
 
@@ -266,4 +276,4 @@ This anti-scope is what lets letterbox be small, inert, auditable, and durable.
 
 ## Status
 
-Letterbox is a frozen v1 artifact — MIT-licensed, at [`github.com/dovahkiin-v/letterbox`](https://github.com/dovahkiin-v/letterbox). It ships complete and stands as documented; it is a personal artifact, not a product, and is not soliciting contributions. *Frozen* here means **unsupported and complete as of this version — not immutable**: the author may cut a later version at their own whim, with no promise or schedule. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for what frozen-artifact status means in practice.
+Letterbox is a versioned, unsupported artifact — MIT-licensed, at [`github.com/dovahkiin-v/letterbox`](https://github.com/dovahkiin-v/letterbox). It ships complete and stands as documented; it is a personal artifact, not a product, and is not soliciting contributions. **Unsupported** means no roadmap, no SLA, and no promise to fix issues or take feature requests — but it is **not frozen**: the author may cut a later version at their own whim, with no schedule. The launcher's once-a-day update check tells you when that happens (`LETTERBOX_NO_UPDATE_CHECK=1` to silence it). See [`CONTRIBUTING.md`](CONTRIBUTING.md) for what that means in practice.

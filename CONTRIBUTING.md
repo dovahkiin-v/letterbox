@@ -1,10 +1,10 @@
 # Contributing to Letterbox
 
-Letterbox is a **frozen reference artifact**, not an actively maintained
+Letterbox is an **unsupported, versioned artifact**, not an actively maintained
 community project. This note explains what that means in practice — what's
 welcome, what isn't, and why.
 
-## What "frozen artifact" means
+## What "unsupported" means
 
 Letterbox v1 ships **complete, documented, and MIT-licensed**. It is "the
 system as of June 2026" — a personal artifact rather than a product. There is **no commitment to
@@ -24,6 +24,20 @@ every load-bearing choice. If you want an *evolving* letterbox, the supported
 path is to fork it — that's encouraged, not begrudged (MIT makes it free and
 clean). If a maintained community project is what you're after, letterbox
 isn't the right fit, and that's fine.
+
+## Versioning & releases
+
+Letterbox is versioned by a single source of truth — `__version__` in
+[`letterbox/__init__.py`](letterbox/__init__.py); `pyproject.toml` reads it
+dynamically, so the two cannot drift. There is no PyPI release: **the git
+`main` HEAD *is* the release.**
+
+If you are the author cutting a change worth flagging to users, **bump
+`__version__` in the same commit** (patch for fixes and small features, minor
+for larger ones). The CLI's once-a-day update check compares a user's installed
+`__version__` against the copy on `main`; skip the bump and users on the old
+build get no "update available" nudge. Skip the bump only for non-shipping
+changes (doc typos, tests).
 
 ## What's welcome
 
@@ -76,12 +90,21 @@ feature request for any of them gets a clear "no":
 
 - **No LLM calls.** Letterbox never invokes a model, spends a token, or holds
   an API key. The notification template is rendered text, not a prompt.
-- **No telemetry, metrics, or analytics.** Nothing is collected.
-- **No phone-home, no auto-update, no version check.** Letterbox never
-  contacts any server. First run is silent.
+- **No telemetry, metrics, or analytics.** Nothing about you or your usage is
+  ever collected or sent — anywhere.
+- **No auto-*install*.** Letterbox never modifies itself: the update check only
+  *reads* a public version string and *tells* you, never downloads or runs
+  anything.
 
-This anti-scope is what lets letterbox stay small, inert, auditable, and
-durable. Adding any of it would change what letterbox *is*.
+The one deliberate exception (added in v1.1) is a single, read-only **update
+check**: on a human launch the CLI fetches the `__version__` on `main` from
+GitHub — at most once a day, cached, with a ≤1.5 s timeout, fully fail-silent —
+and prints a one-line "newer version available" notice. It sends no data about
+you (GitHub sees only the request), never runs for `letterbox mcp`, and is
+disabled outright with `LETTERBOX_NO_UPDATE_CHECK=1`. This reverses v1's "no
+version check, first run is silent" stance; [`DECISIONS.md`](DECISIONS.md)
+ADR-066 records why. Everything else above is still **never, by design** — that
+anti-scope is what keeps letterbox small, inert, auditable, and durable.
 
 ## How to file
 

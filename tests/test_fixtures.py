@@ -197,7 +197,7 @@ async def test_wait_for_polls_at_interval() -> None:
 
 
 def test_ensure_ascii_lint_passes_clean_tree() -> None:
-    """The current letterbox/ tree has zero json.dump(s) calls — trivially clean."""
+    """The letterbox/ tree's json.dump(s) calls all pass ensure_ascii=False (§13.2)."""
     result = subprocess.run(
         [str(_LINT_SCRIPT)],
         cwd=_REPO_ROOT,

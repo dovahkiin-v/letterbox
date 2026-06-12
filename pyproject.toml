@@ -4,7 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "letterbox"
-version = "1.0.0"
+# Single source of truth is ``letterbox.__version__`` (letterbox/__init__.py),
+# read dynamically below. The CLI's once-a-day update check compares that same
+# attribute against the copy on ``main`` — keeping packaging and the check in
+# lockstep means a version bump can never silently skip the "update available"
+# nudge. Bump the attribute, not this file.
+dynamic = ["version"]
 description = "File-based comms protocol for AI-to-AI dialogue between terminal agents."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -56,6 +61,9 @@ Documentation = "https://github.com/dovahkiin-v/letterbox#readme"
 
 [project.scripts]
 letterbox = "letterbox.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "letterbox.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["letterbox*"]

@@ -116,6 +116,11 @@ def main(argv: list[str] | None = None) -> int:
         # all others are in ``_REJECTS_UNKNOWN``.
         if args.command in _REJECTS_UNKNOWN and unknown:
             parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+        # Best-effort 'new version available' nudge, surfaced once here for every
+        # human-facing command BEFORE the handler runs — so the launcher prints it
+        # ahead of the harness PTY taking the terminal. Skipped for ``mcp`` (the
+        # agent's stdio server) and fully fail-silent (see _maybe_print_update_notice).
+        _maybe_print_update_notice(args.command)
         return args.handler(args, extra_args, unknown)
     except config.ConfigError as exc:
         # A malformed/invalid --config (or LETTERBOX_CONFIG) surfaces as a clean
@@ -130,6 +135,33 @@ def main(argv: list[str] | None = None) -> int:
         # 2), not ``ConfigError``, so bogus-flag exits pass through untouched.
         print(f"letterbox: {exc}", file=sys.stderr)
         return 1
+
+
+def _maybe_print_update_notice(command: str | None) -> None:
+    """Print a best-effort 'update available' nudge for human-facing commands.
+
+    Fully fail-silent and skipped for the ``mcp`` stdio server — its stdout is
+    the agent's JSON-RPC stream, and even a stderr line is undesirable noise on
+    a server the agent (not a human) spawned. The cache/timeout/opt-out contract
+    lives in :mod:`letterbox._update`; ``LETTERBOX_NO_UPDATE_CHECK=1`` disables it.
+
+    Args:
+        command: The resolved subcommand (argparse ``dest="command"``).
+
+    Returns:
+        None.
+    """
+    if command == "mcp":
+        return
+    try:
+        from letterbox import __version__
+        from letterbox._update import update_notice
+
+        notice = update_notice(__version__)
+        if notice:
+            print(notice, file=sys.stderr)
+    except Exception:
+        pass
 
 
 def _split_passthrough(raw: list[str]) -> tuple[list[str], list[str]]:

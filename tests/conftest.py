@@ -49,6 +49,23 @@ class FakeHarness:
         return self.echo_file.read_bytes()
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_update_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the whole suite offline with respect to the CLI's update check.
+
+    The launcher prints a best-effort "update available" notice on human-facing
+    commands (:mod:`letterbox._update`). Autouse-disable it so no test — including
+    the cli/e2e tests that invoke ``main`` or spawn a ``letterbox`` subprocess —
+    ever hits the network or reads/writes the real ``~/.cache/letterbox``. The
+    env var propagates to ``os.environ``, so spawned subprocesses inherit the
+    opt-out too. Tests that exercise the checker re-enable it explicitly
+    (``monkeypatch.delenv``) and stub ``_fetch_remote_version`` — see
+    ``test_update_check.py``.
+    """
+    monkeypatch.setenv("LETTERBOX_NO_UPDATE_CHECK", "1")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg_cache"))
+
+
 @pytest.fixture
 def tmp_letterbox_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Yield an isolated ``~/.letterbox/`` rooted under pytest's ``tmp_path``.
