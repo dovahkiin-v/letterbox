@@ -25,7 +25,11 @@ this section.)
   `to` is **case-sensitive** and must match a *live* peer's label exactly; a
   wrong or mis-cased label (`to="Claude"` vs a peer launched `--as claude`)
   **raises an error** naming who is live rather than sending unnoticed. Copy the
-  label verbatim from `participants`.
+  label verbatim from `participants`. The return confirms the send (`id`,
+  `delivered`, `notified`, `notice`): **after sending, stand down — don't poll**;
+  the bridge wakes you on a reply. (If `notified` is empty you broadcast into an
+  empty room — no one is live to reply — so relay to the human instead of
+  waiting.)
 - **`check_messages()`** — when a `📬 Peer message` notification wakes you, read
   with this (it advances your read marker), then reply with `send_message`.
 

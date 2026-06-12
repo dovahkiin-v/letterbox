@@ -93,6 +93,82 @@ def _assert_recipient_live(channel: Channel, recipient: str) -> None:
         "to broadcast."
     )
 
+
+def _notified_labels(channel: Channel, recipient: str | None) -> list[str]:
+    """Return the labels the watcher will raise a 📬 for, for this send (ADR-065).
+
+    Directed (``recipient`` set): exactly that label — it was already proven a
+    live participant by :func:`_assert_recipient_live`, and Filter 7 suppresses
+    the 📬 for everyone else (ADR-062). Broadcast (``recipient`` None): every
+    OTHER live participant on the channel, since a broadcast notifies the whole
+    room. The sender is always excluded — own writes are never echoed back
+    (ADR-022) — so an agent alone in the room gets an empty list, the signal
+    that no one is there to reply.
+
+    Args:
+        channel: The active channel handle (identity + path for the lock scan).
+        recipient: The validated ``to`` label, or ``None`` for a broadcast.
+
+    Returns:
+        Sorted live labels that will receive a 📬 (may be empty for a broadcast
+        into an empty room).
+    """
+    if recipient is not None:
+        return [recipient]
+    # state_dir derived as _assert_recipient_live does it: channel.path is
+    # state_dir/channels/<name>, so two parents up is the state dir.
+    participants = list_live_participants(channel.path.parent.parent, channel.name)
+    return [p for p in participants if p != channel.sender_label]
+
+
+def _send_notice(channel_name: str, recipient: str | None, notified: list[str]) -> str:
+    """Render the post-send confirmation + stand-down guidance (ADR-065).
+
+    The bridge is interrupt-driven: the peer's watcher injects a 📬 when it
+    replies, and this endpoint is never notified of its own writes (ADR-022), so
+    the right move after a send is to STOP — not to poll ``check_messages`` in a
+    loop. This notice says so, but only promises a wake-up when someone is
+    actually there to reply:
+
+    * **Directed, or broadcast with ≥1 live peer** — name who will be notified
+      and tell the agent to stand down.
+    * **Broadcast into an empty room** — make NO reply promise. Warn that no 📬
+      was raised and that a peer joining later will not be auto-notified (the
+      watcher's start watermark only surfaces messages sent after it launched,
+      ADR-024), so the agent does not wait on a reply that will never come. This
+      is a real, supported state: a session can hold a channel alone and have a
+      peer added later.
+
+    Args:
+        channel_name: The channel the message landed in.
+        recipient: The directed target label, or ``None`` for a broadcast.
+        notified: The labels :func:`_notified_labels` resolved for this send.
+
+    Returns:
+        A plain-English notice for the agent.
+    """
+    if recipient is not None:
+        return (
+            f"Delivered to {recipient} (📬). No need to poll for a reply — the "
+            f"bridge is interrupt-driven and will wake you when {recipient} "
+            "replies. End your turn; you'll be notified."
+        )
+    if notified:
+        roster = ", ".join(notified)
+        return (
+            f"Delivered to channel {channel_name!r}. {roster} will be notified "
+            "(📬). No need to poll for a reply — the bridge is interrupt-driven "
+            "and will wake you when one arrives. End your turn."
+        )
+    return (
+        f"Written to channel {channel_name!r}, but no other participant is live "
+        "right now — no 📬 was raised. A peer that joins later will NOT be "
+        "auto-notified of this message (the watcher only surfaces messages sent "
+        "after it starts). Don't wait on a reply that isn't coming: relay this "
+        "to the human, or resend once a peer has joined."
+    )
+
+
 # The agent-facing explanation surfaced both as the dormant ``channel_info``
 # detail and as the error every messaging tool raises when called with no
 # active bridge (ADR-056). Phrased for the AGENT: it says what is true and what
@@ -403,7 +479,7 @@ def _build_server(
     def send_message(
         body: str, to: str | None = None, in_reply_to: str | None = None
     ) -> dict:
-        """Write a message to the current channel and return its message id.
+        """Write a message to the current channel and confirm the send.
 
         Leave ``to`` unset to broadcast — every participant on the channel is
         notified (📬) and sees it. Set ``to`` to a participant's label (see
@@ -427,6 +503,18 @@ def _build_server(
         launch identity (§3.2). Bodies over 5 MB are rejected with
         MessageTooLarge before any disk I/O. Errors if there is no active
         bridge — call channel_info first if unsure.
+
+        Returns a confirmation dict (ADR-065): ``id`` (the new message-id stem),
+        ``delivered`` (``True`` once the message is on disk), ``notified`` (the
+        labels the watcher will raise a 📬 for — the directed target, or every
+        other live participant for a broadcast), and ``notice`` (plain-English
+        guidance). **After sending, stop and end your turn — do NOT poll**
+        ``check_messages``/``check_latest_message`` waiting for a reply. The
+        bridge is interrupt-driven: when the peer replies, a 📬 wakes you. The
+        one exception is a broadcast into an empty room (``notified`` is empty):
+        no one is live to reply and a later joiner won't be auto-notified, so
+        relay that to the human instead of waiting — ``notice`` says which case
+        you are in.
         """
         _require_bridge()
         # K4 — sender identity is server-side (from the launcher-resolved
@@ -454,7 +542,20 @@ def _build_server(
         # K3 — write_message encodes first, so MessageTooLarge propagates
         # before any .tmp is created; no pre-check, no catch-and-wrap.
         write_message(channel.path, msg)
-        return {"id": msg.id}
+        # ADR-065 — confirm the send synchronously and tell the agent to stand
+        # down. The bridge is interrupt-driven (the peer's watcher raises the 📬
+        # on its reply; own writes are never echoed back — ADR-022), so polling
+        # after a send only burns context. ``notified`` reports who will
+        # actually be woken, so the "you'll be pinged" promise is made only when
+        # it is true: a broadcast into an empty room warns instead, because the
+        # start watermark means a later joiner won't be auto-notified (ADR-024).
+        notified = _notified_labels(channel, recipient)
+        return {
+            "id": msg.id,
+            "delivered": True,
+            "notified": notified,
+            "notice": _send_notice(channel.name, recipient, notified),
+        }
 
     @server.tool()
     def check_latest_message() -> dict | None:

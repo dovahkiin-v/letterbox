@@ -792,6 +792,67 @@ class TestSendMessage:
         result = _fn(server, "send_message")(body="x")  # no peers live at all
         assert (ch.path / f"{result['id']}.json").is_file()
 
+    def test_confirmation_envelope_broadcast_with_live_peer(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        """ADR-065 — a broadcast with a live peer returns delivered + notified +
+        a stand-down notice naming who will get the 📬.
+        """
+        _ch, server = _real_channel_and_server(
+            tmp_letterbox_home, channel="review", label="claude"
+        )
+        _plant_live_lock(tmp_letterbox_home, channel="review", label="gemini")
+        result = _fn(server, "send_message")(body="x")
+        assert result["delivered"] is True
+        assert result["notified"] == ["gemini"]
+        assert "gemini" in result["notice"]
+        assert "poll" in result["notice"].lower()
+
+    def test_confirmation_envelope_directed_notifies_only_recipient(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        """ADR-065 — a directed send reports exactly the recipient as notified
+        (Filter 7 suppresses the 📬 for everyone else, ADR-062).
+        """
+        _ch, server = _real_channel_and_server(
+            tmp_letterbox_home, channel="review", label="claude"
+        )
+        _plant_live_lock(tmp_letterbox_home, channel="review", label="gemini")
+        _plant_live_lock(tmp_letterbox_home, channel="review", label="claude-commit")
+        result = _fn(server, "send_message")(body="x", to="gemini")
+        assert result["notified"] == ["gemini"]  # NOT claude-commit
+        assert "gemini" in result["notice"]
+
+    def test_confirmation_envelope_excludes_self_from_notified(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        """ADR-065 — the sender never appears in ``notified``: own writes are
+        never echoed back (ADR-022), so a 📬 for yourself is impossible.
+        """
+        _ch, server = _real_channel_and_server(
+            tmp_letterbox_home, channel="review", label="claude"
+        )
+        _plant_live_lock(tmp_letterbox_home, channel="review", label="claude")
+        _plant_live_lock(tmp_letterbox_home, channel="review", label="gemini")
+        result = _fn(server, "send_message")(body="x")
+        assert result["notified"] == ["gemini"]
+
+    def test_confirmation_envelope_empty_room_warns_no_ping(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        """ADR-065 — a broadcast into an empty room still delivers to disk, but
+        ``notified`` is empty and the notice warns instead of promising a reply
+        (a later joiner won't be auto-notified, ADR-024).
+        """
+        ch, server = _real_channel_and_server(tmp_letterbox_home, channel="review")
+        result = _fn(server, "send_message")(body="x")  # no peers live at all
+        assert (ch.path / f"{result['id']}.json").is_file()
+        assert result["delivered"] is True
+        assert result["notified"] == []
+        notice = result["notice"]
+        assert "no other participant is live" in notice
+        assert "Don't wait" in notice
+
     def test_empty_to_normalizes_to_broadcast(
         self, tmp_letterbox_home: Path
     ) -> None:

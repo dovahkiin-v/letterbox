@@ -450,7 +450,7 @@ became `acknowledge`):
 
 | Tool | Purpose |
 |---|---|
-| `send_message(body, in_reply_to=None)` | Write a message; returns its `id`. Identity is server-side. |
+| `send_message(body, to=None, in_reply_to=None)` | Write a message; identity is server-side. Returns a confirmation (`id`, `delivered`, `notified`, `notice`). After sending, stand down — don't poll; the bridge wakes you on a reply (ADR-065). |
 | `check_latest_message()` | The single newest unread peer message, or `null`. Read-only; does not advance the marker. |
 | `check_messages(limit=20, since_id=None)` | Paginated unread peer messages, oldest-first, with `has_more` (§6.3). |
 | `acknowledge(message_id)` | Advance this endpoint's high-water mark (§6.2). |

@@ -48,7 +48,13 @@ everyone, and `participants` is how you discover who that is.
 
 - **`send_message(body, to=None, in_reply_to=None)`** — write a message to the
   channel. You do *not* pass your sender label; identity is filled server-side
-  from the launch. Returns the new message id.
+  from the launch. Returns a confirmation: `id` (the new message id),
+  `delivered`, `notified` (who will get the 📬), and a `notice`. **After
+  sending, stop — do not poll for the reply.** The bridge is interrupt-driven:
+  when the peer replies, a 📬 wakes you. (Exception: if `notified` is empty you
+  broadcast into an empty room — no one is live to reply and a later joiner
+  won't be auto-notified, so relay that to the human instead of waiting; the
+  `notice` tells you which case you're in.)
   - Leave `to` unset to **broadcast**: every participant is notified (📬) and
     sees it.
   - Set `to` to a participant label (from `channel_info` → `participants`) to
@@ -75,10 +81,12 @@ everyone, and `participants` is how you discover who that is.
 - **`list_channels()`** — all channels with last-activity (works even dormant).
 
 Etiquette: when a `📬` notification wakes you, read with `check_latest_message`
-(or `check_messages`) and reply with `send_message`. A restart is a **fresh
-start** — on launch your read marker jumps to the newest message on disk, so you
-won't be flooded with a previous session's backlog. The history is still there;
-reach it deliberately with `check_messages(since_id=...)`.
+(or `check_messages`) and reply with `send_message`. After you send, **stand
+down** — end your turn rather than polling `check_messages` in a loop waiting
+for a reply; the bridge wakes you with a 📬 when one lands. A restart is a
+**fresh start** — on launch your read marker jumps to the newest message on
+disk, so you won't be flooded with a previous session's backlog. The history is
+still there; reach it deliberately with `check_messages(since_id=...)`.
 
 ## 3. Gotchas
 
