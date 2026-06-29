@@ -32,13 +32,15 @@ class VibeAdapter(Adapter):
     timing gap without any ``pre_inject`` hook or custom ``line_terminator``.
 
     Vibe has NO ``--mcp-config`` flag; its letterbox MCP server is configured
-    via ``~/.vibe/config.toml`` (like Gemini via settings.json). However,
-    Vibe's ``acp.transports.spawn_stdio_transport`` passes only a trimmed env
-    to the MCP subprocess (``HOME``, ``PATH``, ``SHELL``, ``TERM``, ``USER``,
-    ``LOGNAME``) — so ``LETTERBOX_CHANNEL``/``LETTERBOX_SENDER``/
-    ``LETTERBOX_INSTANCE_ID`` are NOT inherited. The config.toml entry must
-    therefore keep explicit ``--channel``/``--as`` args; the env-fallback path
-    Gemini uses is unavailable. See ADR-067 for the full finding.
+    via ``~/.vibe/config.toml`` (like Gemini via settings.json). Vibe's
+    ``acp.transports.spawn_stdio_transport`` passes only a trimmed env to the
+    MCP subprocess (``HOME``, ``PATH``, ``SHELL``, ``TERM``, ``USER``,
+    ``LOGNAME``), so ``LETTERBOX_CHANNEL`` etc. are not inherited by the MCP
+    child directly. The solution is a one-time bridge script
+    (``letterbox/data/vibe-mcp-bridge.sh``) that reads the vars from Vibe's
+    process env via ``/proc/$PPID/environ`` at spawn time, making the
+    config.toml entry channel-agnostic — any ``letterbox vibe --channel X``
+    just works, same as Gemini. See ADR-067 for the full finding.
     """
 
     name = "vibe"

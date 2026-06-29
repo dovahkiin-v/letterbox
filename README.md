@@ -53,7 +53,7 @@ There is no daemon, no IPC, no background service. The filesystem *is* the coord
 
 - **Claude Code** takes a launch flag, so letterbox wires it *automatically* — it generates a temporary MCP config and passes `--mcp-config` to `claude`. Nothing for you to set up.
 - **Gemini CLI and Antigravity** don't take that flag; they load MCP servers from their own settings file. You add a one-line, channel-agnostic `letterbox` entry there once, and the launcher hands each session its channel and identity through environment variables at launch — so you never edit settings per channel.
-- **Vibe** loads MCP servers from `~/.vibe/config.toml`, but unlike Gemini/Antigravity its MCP subprocess inherits only a trimmed environment — so the channel and identity must be set explicitly in the config entry. This means a Vibe session is **channel-locked at config time**: the `--channel` and `--as` you pass to `letterbox vibe` must match what's in `config.toml`. See the [Vibe setup](#vibe-mistral) section.
+- **Vibe** loads MCP servers from `~/.vibe/config.toml`. Its MCP subprocess inherits only a trimmed environment, so a one-time bridge script is needed to relay `LETTERBOX_CHANNEL` / `LETTERBOX_SENDER` from Vibe's own process env. Once that's in place, any channel works exactly like Gemini. See the [Vibe setup](#vibe-mistral) section.
 
 ## Who it's for
 
@@ -160,25 +160,37 @@ The `mcp_config.json` is channel-agnostic for the same reason Gemini's settings 
 
 ### Vibe (Mistral)
 
-Launch it as **`letterbox vibe …`**. Vibe loads MCP servers from `~/.vibe/config.toml`. Add a `letterbox` entry there:
+Launch it as **`letterbox vibe …`**. Vibe loads MCP servers from `~/.vibe/config.toml`, but its MCP subprocess inherits only a trimmed environment (`HOME`, `PATH`, `SHELL`, `TERM`, `USER`, `LOGNAME`) — so `LETTERBOX_CHANNEL` etc. don't reach it via normal inheritance. A small one-time bridge script fixes this by reading them from Vibe's process via `/proc` at spawn time. After that, any channel works exactly like Gemini — no config editing per channel.
+
+**1. Install the bridge script** (ships with letterbox):
+
+```bash
+cp "$(python3 -c 'import letterbox.data, pathlib; print(pathlib.Path(letterbox.data.__file__).parent / "vibe-mcp-bridge.sh")')" \
+   ~/.letterbox/vibe-mcp-bridge.sh
+chmod +x ~/.letterbox/vibe-mcp-bridge.sh
+```
+
+**2. Register it** in `~/.vibe/config.toml`. Replace any existing `letterbox` entry with:
 
 ```toml
 [[mcp_servers]]
 name = "letterbox"
 transport = "stdio"
-command = "/absolute/path/to/letterbox"
-args = ["mcp", "--channel", "your-channel", "--as", "your-label"]
+command = "/home/YOU/.letterbox/vibe-mcp-bridge.sh"
+args = []
 ```
 
-Use the **absolute path** from `which letterbox`. Unlike Gemini/Antigravity, you must include the channel and label **explicitly in `args`** — Vibe's MCP subprocess launches with a trimmed environment, so the env vars the launcher exports (`LETTERBOX_CHANNEL`, `LETTERBOX_SENDER`) are not visible to it. This means the entry is **channel-specific**: update `--channel` and `--as` whenever you want to bridge a different channel, and always pass the matching values to `letterbox vibe`:
+Use your actual home path (not `~` — Vibe may not expand it). The entry is **channel-agnostic on purpose**: the bridge script reads the channel and identity from Vibe's process env at runtime, exactly as Gemini reads them from its environment.
+
+**3. Done.** Any channel works:
 
 ```bash
-letterbox vibe --channel your-channel --as your-label
+letterbox vibe --channel blueberry-fields --as mistral
 ```
 
-If the CLI flags and the `config.toml` entry point to different channels, the watcher and the MCP tools will be talking past each other.
-
 Vibe also launches with `--yolo` (auto-approve) so injected notifications can wake it without blocking on a per-tool prompt.
+
+> **Note:** the bridge script uses `/proc/$PPID/environ` to read Vibe's environment — Linux-only, which aligns with letterbox's POSIX-only stance. macOS support would need a different mechanism (`ps -p $PPID -Ewww`); not currently shipped.
 
 > **Status:** 📬 wake injection is confirmed working (STEP 0 verified that Vibe's `ChatTextArea` overrides Enter to submit, so the standard PTY inject path applies). Treat Vibe as **the newest of the four** and report anything odd.
 
