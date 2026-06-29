@@ -31,7 +31,7 @@ __all__ = ["main"]
 
 # Harness subcommands route to ``launcher.run_launcher``. The three names match
 # the registered adapter keys (W12, 8a) and the ``[harness.*]`` config blocks.
-_HARNESSES = ("claude", "gemini", "antigravity")
+_HARNESSES = ("claude", "gemini", "antigravity", "vibe")
 
 # Friendly subcommand aliases that route to a canonical harness. ``agy`` is the
 # Antigravity binary name and the way people actually launch it, so

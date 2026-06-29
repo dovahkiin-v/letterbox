@@ -15,13 +15,13 @@ __all__ = ["load_builtin_adapters"]
 def load_builtin_adapters() -> None:
     """Import the built-in concrete adapters for their registration side-effect.
 
-    Each concrete adapter module (``claude``, ``gemini``, ``antigravity``)
-    registers itself with the ``letterbox.adapters.base`` registry via the
-    ``@register_adapter`` decorator at import time. This function performs those
-    imports *inside its body* — never at module level — so that importing the
-    ``letterbox.adapters`` package stays free of side effects (ADR-039). The
-    launcher calls it once during setup so ``get_adapter("claude" | "gemini" |
-    "antigravity")`` resolves.
+    Each concrete adapter module (``claude``, ``gemini``, ``antigravity``,
+    ``vibe``) registers itself with the ``letterbox.adapters.base`` registry
+    via the ``@register_adapter`` decorator at import time. This function
+    performs those imports *inside its body* — never at module level — so that
+    importing the ``letterbox.adapters`` package stays free of side effects
+    (ADR-039). The launcher calls it once during setup so ``get_adapter(
+    "claude" | "gemini" | "antigravity" | "vibe")`` resolves.
 
     Idempotent: the import cache makes repeated calls a no-op (each
     ``@register_adapter`` runs once per process, on the first import of its
@@ -34,4 +34,4 @@ def load_builtin_adapters() -> None:
     """
     # Imported for the @register_adapter side-effect only; the names are
     # intentionally unused after import.
-    from letterbox.adapters import antigravity, claude, gemini  # noqa: F401
+    from letterbox.adapters import antigravity, claude, gemini, vibe  # noqa: F401

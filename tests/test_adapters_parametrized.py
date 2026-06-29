@@ -53,14 +53,15 @@ from letterbox.adapters.antigravity import AntigravityAdapter
 from letterbox.adapters.base import Adapter, get_adapter
 from letterbox.adapters.claude import ClaudeAdapter
 from letterbox.adapters.gemini import GeminiAdapter
+from letterbox.adapters.vibe import VibeAdapter
 from letterbox.adapters.mcp_config import cleanup_mcp_config, generate_mcp_config
 from letterbox.adapters.pty_common import PTYHandle
 from tests.conftest import FakeHarness
 from tests.helpers import wait_for
 
-# The complete v1 adapter population — no fourth adapter exists (K1).
-_ADAPTER_CLASSES = [ClaudeAdapter, GeminiAdapter, AntigravityAdapter]
-_ADAPTER_NAMES = ["claude", "gemini", "antigravity"]
+# The complete adapter population — 4 adapters (Claude, Gemini, Antigravity, Vibe).
+_ADAPTER_CLASSES = [ClaudeAdapter, GeminiAdapter, AntigravityAdapter, VibeAdapter]
+_ADAPTER_NAMES = ["claude", "gemini", "antigravity", "vibe"]
 
 # fake_harness can't interrupt its blocking read on SIGTERM (PEP 475), so
 # close_pty_handle pays the full timeout then SIGKILLs. Keep cleanup snappy.
