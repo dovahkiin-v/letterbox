@@ -4,23 +4,23 @@
 
 > 📌 **Built for internal production use.** Architecture proven across 6 months of daily AI development. Open-sourced as a reference implementation.
 
-**In plain terms:** If you use AI coding assistants in the terminal, you normally work with one at a time — and getting two of them to collaborate means copy-pasting messages between windows yourself. Letterbox lets two assistants (say, Claude and Gemini) talk *directly* to each other and work a task together, hands-free.
+**In plain terms:** If you use AI coding assistants in the terminal, you normally work with one at a time — and getting two of them to collaborate means copy-pasting messages between windows yourself. Letterbox lets two assistants (say, Claude and Gemini, or Gemini and Mistral's Vibe) talk *directly* to each other and work a task together, hands-free.
 
 **The result:** one agent can plan while another reviews, or the two can split the work between them — collaborating on their own while you watch, instead of relaying every message by hand.
 
 *A small file-based comms protocol that lets two AI agents in separate terminals talk to each other in real time.*
 
-**Letterbox** lets two terminal coding agents — Claude Code, Gemini CLI, or Antigravity — hold a real-time conversation by passing message files through a shared directory. When one agent speaks, a `📬` notification is injected into the other's terminal and wakes it to read and reply. No network, no server, no shared memory: just JSON files in a folder and the OS's atomic-rename. It's the messaging layer that was built for an internal planning loop, extracted into a standalone, versioned tool in 2026. If you've ever wanted two CLI agents to collaborate on a task without you copy-pasting between windows, this is for you. It gets the occasional update at the author's whim (the launcher tells you when a newer one is out) — but it's unsupported: no roadmap, no feature requests, not a community project.
+**Letterbox** lets two terminal coding agents — Claude Code, Gemini CLI, Antigravity, or Mistral's Vibe — hold a real-time conversation by passing message files through a shared directory. When one agent speaks, a `📬` notification is injected into the other's terminal and wakes it to read and reply. No network, no server, no shared memory: just JSON files in a folder and the OS's atomic-rename. It's the messaging layer that was built for an internal planning loop, extracted into a standalone, versioned tool in 2026. If you've ever wanted two CLI agents to collaborate on a task without you copy-pasting between windows, this is for you. It gets the occasional update at the author's whim (the launcher tells you when a newer one is out) — but it's unsupported: no roadmap, no feature requests, not a community project.
 
 The bridge is genuinely cross-harness: **Claude on one side, Gemini on the other**, talking through the same channel, has been verified live. The one wrinkle is setup — Claude wires itself automatically, while Gemini and Antigravity load letterbox from their own settings. The [Setup](#setup-per-harness) section walks through both.
 
 ## Why it exists
 
-I work with two AI collaborators every day — Claude and Gemini — each living in whatever terminal harness it runs in (Claude Code, Gemini CLI, and now Antigravity CLI). Letterbox is how I get them talking to *each other* instead of through me.
+I work with two AI collaborators every day — Claude and Gemini — each living in whatever terminal harness it runs in (Claude Code, Gemini CLI, Antigravity CLI, and now Mistral's Vibe). Letterbox is how I get them talking to *each other* instead of through me.
 
 That happens in two modes. Sometimes it's **manual**: we're brainstorming and I want to loop the other model into the conversation. Sometimes it's **automated** — in the planning loop, Claude drafts a plan and each plan is routed to Gemini for review as a built-in stage. Letterbox carries both the same way.
 
-It's harness-agnostic by design — **Claude Code ↔ Gemini CLI ↔ Antigravity CLI** in any combination — and same-model pairs work just as well: two Claude tabs, or two Gemini tabs, talking over one channel.
+It's harness-agnostic by design — **Claude Code ↔ Gemini CLI ↔ Antigravity CLI ↔ Vibe** in any combination — and same-model pairs work just as well: two Claude tabs, or two Gemini tabs, talking over one channel.
 
 ## What it is
 
@@ -53,6 +53,7 @@ There is no daemon, no IPC, no background service. The filesystem *is* the coord
 
 - **Claude Code** takes a launch flag, so letterbox wires it *automatically* — it generates a temporary MCP config and passes `--mcp-config` to `claude`. Nothing for you to set up.
 - **Gemini CLI and Antigravity** don't take that flag; they load MCP servers from their own settings file. You add a one-line, channel-agnostic `letterbox` entry there once, and the launcher hands each session its channel and identity through environment variables at launch — so you never edit settings per channel.
+- **Vibe** loads MCP servers from `~/.vibe/config.toml`, but unlike Gemini/Antigravity its MCP subprocess inherits only a trimmed environment — so the channel and identity must be set explicitly in the config entry. This means a Vibe session is **channel-locked at config time**: the `--channel` and `--as` you pass to `letterbox vibe` must match what's in `config.toml`. See the [Vibe setup](#vibe-mistral) section.
 
 ## Who it's for
 
@@ -84,7 +85,7 @@ This puts the `letterbox` command on your `PATH`. The command must resolve by na
 which letterbox           # note this absolute path; Gemini/Antigravity setup needs it
 ```
 
-You also need the harness you're launching (`claude`, `gemini`, or `antigravity`) installed, on your `PATH`, and logged in. Letterbox launches it for you.
+You also need the harness you're launching (`claude`, `gemini`, `antigravity`, or `vibe`) installed, on your `PATH`, and logged in. Letterbox launches it for you.
 
 ### Updating
 
@@ -156,6 +157,30 @@ agy plugin list
 The `mcp_config.json` is channel-agnostic for the same reason Gemini's settings entry is — the launcher passes the channel and identity by environment at launch. Like Gemini, `agy` also gates on folder trust: it honours a `trustedWorkspaces` list in `~/.gemini/antigravity-cli/settings.json`, so add the directory you launch from there if it isn't already.
 
 > **Status:** the PTY layer (notifications + message delivery, both directions) is **verified live**, and the plugin install above wires the tools cleanly. The full tools-in-`agy` round trip is freshly working and lightly exercised — treat Antigravity as **the newest of the three** and report anything odd.
+
+### Vibe (Mistral)
+
+Launch it as **`letterbox vibe …`**. Vibe loads MCP servers from `~/.vibe/config.toml`. Add a `letterbox` entry there:
+
+```toml
+[[mcp_servers]]
+name = "letterbox"
+transport = "stdio"
+command = "/absolute/path/to/letterbox"
+args = ["mcp", "--channel", "your-channel", "--as", "your-label"]
+```
+
+Use the **absolute path** from `which letterbox`. Unlike Gemini/Antigravity, you must include the channel and label **explicitly in `args`** — Vibe's MCP subprocess launches with a trimmed environment, so the env vars the launcher exports (`LETTERBOX_CHANNEL`, `LETTERBOX_SENDER`) are not visible to it. This means the entry is **channel-specific**: update `--channel` and `--as` whenever you want to bridge a different channel, and always pass the matching values to `letterbox vibe`:
+
+```bash
+letterbox vibe --channel your-channel --as your-label
+```
+
+If the CLI flags and the `config.toml` entry point to different channels, the watcher and the MCP tools will be talking past each other.
+
+Vibe also launches with `--yolo` (auto-approve) so injected notifications can wake it without blocking on a per-tool prompt.
+
+> **Status:** 📬 wake injection is confirmed working (STEP 0 verified that Vibe's `ChatTextArea` overrides Enter to submit, so the standard PTY inject path applies). Treat Vibe as **the newest of the four** and report anything odd.
 
 ## Quickstart
 
@@ -271,7 +296,7 @@ This anti-scope is what lets letterbox be small, inert, auditable, and durable.
 - [`skills/letterbox-setup/SKILL.md`](skills/letterbox-setup/SKILL.md) — the agent-facing **setup** guide: the one-time per-harness MCP wiring, the one-label-per-channel rule, and the post-upgrade relaunch procedure.
 - [`docs/AGENT_POINTER.md`](docs/AGENT_POINTER.md) — a short drop-in block to paste into a project's `CLAUDE.md` / `GEMINI.md` / `AGENTS.md` so an agent knows it's on a bridge.
 - The full file-format and protocol reference lives in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
-- [`DECISIONS.md`](DECISIONS.md) — the architecture decision records (ADRs) behind every load-bearing choice, including the per-harness MCP wiring (ADR-054/055), dormant mode and the `channel_info` oracle (ADR-056), the submit-timing fix (ADR-057), the self-maintaining read marker (ADR-058), the per-channel duplicate-instance guard (ADR-061), and N-party directed addressing + participants (ADR-062).
+- [`DECISIONS.md`](DECISIONS.md) — the architecture decision records (ADRs) behind every load-bearing choice, including the per-harness MCP wiring (ADR-054/055), dormant mode and the `channel_info` oracle (ADR-056), the submit-timing fix (ADR-057), the self-maintaining read marker (ADR-058), the per-channel duplicate-instance guard (ADR-061), N-party directed addressing + participants (ADR-062), and the Vibe adapter + Textual submit contract (ADR-067).
 - [`LICENSE`](LICENSE) — MIT.
 
 ## Status
