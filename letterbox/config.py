@@ -124,6 +124,11 @@ DEFAULT_HARNESSES: dict[str, HarnessConfig] = {
         default_args=[],
         notification_template="📬 Peer message on channel {channel}. Use check_messages.",
     ),
+    "vibe": HarnessConfig(
+        command="vibe",
+        default_args=["--yolo"],
+        notification_template="📬 Peer message on channel {channel}. Use check_messages.",
+    ),
 }
 
 DEFAULT_CHANNELS: list[ChannelConfig] = []
