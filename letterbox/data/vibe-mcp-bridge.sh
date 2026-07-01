@@ -39,7 +39,7 @@ _ppid_env() {
 
 CHANNEL=$(_ppid_env LETTERBOX_CHANNEL)
 SENDER=$(_ppid_env LETTERBOX_SENDER)
-INSTANCE_ID=$(_ppid_env LETTERBOX_INSTANCE_ID)
+INSTANCE_ID="lb-$(date -u +%Y%m%dT%H%M%SZ)-$(head -c3 /dev/urandom | xxd -p)"
 
 exec letterbox mcp \
     ${CHANNEL:+--channel "$CHANNEL"} \
