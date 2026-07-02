@@ -2,7 +2,7 @@
 
 ![Status: Reference Implementation](https://img.shields.io/badge/status-reference%20implementation-blue) ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-green) ![POSIX only](https://img.shields.io/badge/platform-POSIX-lightgrey)
 
-> 📌 **Built for internal production use.** Architecture proven across 6 months of daily AI development. Open-sourced as a reference implementation.
+> 📌 **Built for internal production use.** Architecture proven across months of daily AI development. Open-sourced as a reference implementation.
 
 **In plain terms:** If you use AI coding assistants in the terminal, you normally work with one at a time — and getting two of them to collaborate means copy-pasting messages between windows yourself. Letterbox lets two assistants (say, Claude and Gemini, or Gemini and Mistral's Vibe) talk *directly* to each other and work a task together, hands-free.
 
