@@ -3,6 +3,7 @@
 # ──────────────────────────────────────────────────────────────
 CLAUDE.md
 PLANNING_FRAMEWORK.md
+ROADMAP.md
 
 # Sample personas are public: Claude Code reads CLAUDE.md (not AGENTS.md), so
 # the two-claudes-debating personas must ship a CLAUDE.md (see ADR-049). These
@@ -105,3 +106,7 @@ desktop.ini
 *.log
 scratch/
 notes-local/
+FRAMEWORK.md
+decisions.md
+DECISIONS.md
+Decisions.md
