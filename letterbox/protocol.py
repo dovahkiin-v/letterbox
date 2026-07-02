@@ -8,12 +8,14 @@ Filled in: Phase 2a/2b/2c/2d per PHASE_INDEX.
 """
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import os
 import re
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -804,12 +806,59 @@ def list_messages(
             layers create the directory eagerly via
             ``Channel.get_or_create`` (Phase 3a).
     """
-    out: list[Path] = []
+    return [
+        channel_dir / name
+        for name in sorted(_scan_valid_names(channel_dir, since))
+    ]
+
+
+def _scan_valid_names(
+    channel_dir: Path,
+    since: str | None = None,
+) -> list[str]:
+    """Scan ``channel_dir`` once, returning valid message filenames (unsorted).
+
+    The single home of the enumeration invariants shared by
+    :func:`list_messages` and the channel-layer hot readers
+    (``Channel.list_unread`` / ``Channel.latest_unread``): the
+    :func:`os.scandir` walk, the ``is_dir()`` skip, the
+    :func:`is_valid_message_filename` validation, the ADR-028 warn-once
+    side effect, the ``.tmp`` structural exclusion (via the ``\\.json$``
+    regex anchor), and the optional strict-greater ``since`` cursor
+    filter. Validation is a side effect of *scanning* — every entry is
+    checked and warned-on-once regardless of whether the caller keeps
+    it — so no early-termination cleverness is permitted here (it would
+    break ADR-028 warn-once, which must see every entry).
+
+    Returns bare ``entry.name`` strings (not :class:`Path` objects) so
+    that lazy directional selection over the corpus operates on cheap
+    ``str`` comparisons; callers that want ``Path`` objects reconstruct
+    them via ``channel_dir / name`` (equivalent to ``Path(entry.path)``
+    since ``entry.path == os.path.join(channel_dir, name)``).
+
+    Args:
+        channel_dir: Directory to enumerate.
+        since: Optional filename string used as a **strictly greater**
+            cursor — entries with ``name <= since`` are skipped (G8).
+            ``None`` returns all matching entries. The cursor is a
+            *filename*, not a bare message id.
+
+    Returns:
+        A list of valid message filenames in scan (arbitrary) order.
+        Empty list if no entries match.
+
+    Raises:
+        FileNotFoundError: If ``channel_dir`` does not exist (consistent
+            with :func:`os.scandir` semantics).
+    """
+    out: list[str] = []
     with os.scandir(channel_dir) as it:
         for entry in it:
             # Skip directories — only files can be messages. We never
             # recurse; multi-level layouts (e.g., ``.read/``) are owned
-            # by the channel layer, not the protocol layer.
+            # by the channel layer, not the protocol layer. N4 — this
+            # skip stays BEFORE validation so ``.read/``/``cold/`` never
+            # emit spurious ADR-028 warnings.
             if entry.is_dir():
                 continue
             name = entry.name
@@ -829,9 +878,69 @@ def list_messages(
                 continue
             if since is not None and name <= since:
                 continue
-            out.append(Path(entry.path))
-    out.sort(key=lambda p: p.name)
+            out.append(name)
     return out
+
+
+def _iter_names_ascending(names: list[str]) -> Iterator[str]:
+    """Yield ``names`` in ascending lexical order, lazily via a min-heap.
+
+    ``heapify`` is O(N) (≈ the unavoidable scan cost); each ``heappop`` is
+    O(log N). A reader that stops after *k* pops pays O(N + k·log N), not
+    the O(N·log N) of a full sort. Ascending lexical order equals
+    chronological order per §3.2 / ADR-017.
+
+    Args:
+        names: The filenames to iterate (consumed into a private heap;
+            the caller's list is copied, not mutated).
+
+    Yields:
+        Filenames in ascending lexical order.
+    """
+    heap = list(names)
+    heapq.heapify(heap)
+    while heap:
+        yield heapq.heappop(heap)
+
+
+class _Rev:
+    """Reverse-comparator wrapper: inverts ``<`` so a min-heap pops max-first.
+
+    Wrapping each name in ``_Rev`` turns :mod:`heapq`'s min-heap into a
+    max-heap over the underlying names without a negated key (names are
+    strings, not numbers) — the public-API-only idiom for lazy descending
+    selection on a frozen artifact. ``__slots__`` keeps the per-name
+    wrapper allocation minimal at 10k corpus sizes.
+    """
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __lt__(self, other: "_Rev") -> bool:
+        return self.name > other.name
+
+
+def _iter_names_descending(names: list[str]) -> Iterator[str]:
+    """Yield ``names`` in descending lexical (newest-first) order, lazily.
+
+    The reverse of :func:`_iter_names_ascending`, via the :class:`_Rev`
+    wrapper so :mod:`heapq`'s min-heap pops the maximum name first. Same
+    O(N + k·log N) cost profile: a reader that stops after *k* pops (e.g.
+    ``latest_unread`` stopping at the first unread peer) never pays the
+    full-corpus sort.
+
+    Args:
+        names: The filenames to iterate.
+
+    Yields:
+        Filenames in descending lexical order (newest first).
+    """
+    heap = [_Rev(n) for n in names]
+    heapq.heapify(heap)
+    while heap:
+        yield heapq.heappop(heap).name
 
 
 # ──────────────────────────────────────────────────────────────

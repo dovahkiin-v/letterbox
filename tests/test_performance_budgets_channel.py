@@ -1,9 +1,25 @@
 """Vision §9.4 channel-layer performance budgets — blocks IMPLEMENTATION DONE per §13.7.
 
-The single budget asserted here covers the ``Channel.acknowledge`` row in
-Vision §9.4 (BUDGET-OWNER for Phase 3c). Per Cross-Cutting §13.7 this
-test is a gate on ``[IMPLEMENTATION DONE]`` for Phase 3c; CI failures
-here are real regressions, not flakes (no retry).
+The budgets asserted here cover three Vision §9.4 rows:
+``Channel.acknowledge`` (BUDGET-OWNER for Phase 3c) and the two
+``check_messages`` rows (``list_unread`` at ``limit=20`` @ 100 ms and
+``limit=100`` @ 300 ms). Per Cross-Cutting §13.7 these tests gate
+``[IMPLEMENTATION DONE]``; CI failures here are real regressions, not
+flakes (no retry).
+
+The two ``check_messages`` rows moved here from
+``tests/test_performance_budgets_protocol.py`` when the full-corpus sort
+in ``list_messages`` was eliminated (DECISIONS.md — shared scan primitive
++ lazy heap iterators). They now drive the REAL tool path,
+``Channel.list_unread``, rather than a protocol-layer
+``list_messages()[-20:]`` stand-in — the honest §9.4 gate is the caller
+agents actually hit. Cost model per call: O(N) ``_scan_valid_names`` scan
++ O(N) cursor filter + O(M) ``heapify`` + O((filled+skipped)·log M) lazy
+pops, where M is the unread count — no O(N·log N) full sort. On the 10k
+fresh-cursor corpus (every message unread) the ``limit=20`` page reads 21
+messages / the ``limit=100`` page 101; both clear budget with headroom on
+~2× GitHub runners (the old protocol-layer row's P95 landed ~110–116 ms
+against 100 ms, the regression this change fixes).
 
 Mirrors the 2d ``tests/test_performance_budgets_protocol.py`` shape
 verbatim — same ``_BENCH_RUNS = 30``, same ``_BENCH_WARMUP = 5``, same
@@ -43,17 +59,20 @@ Calibration block (per PLANNING_NOTES "show your work"):
   workflow). Both have ample headroom for the 50 ms budget — typical
   ``acknowledge`` on warm cache is 0.2–1 ms.
 
-  ===========================  ============  ==================  ===========
-  Benchmark                    Budget        Expected P95        Headroom
-  ===========================  ============  ==================  ===========
-  ``Channel.acknowledge``      50 ms         ~0.2–1 ms           ≈50–250×
-  ===========================  ============  ==================  ===========
+  ============================  ============  ================  ===========
+  Benchmark                     Budget        Expected P95      Headroom
+  ============================  ============  ================  ===========
+  ``Channel.acknowledge``       50 ms         ~0.2–1 ms         ≈50–250×
+  ``list_unread`` 20 (10k)      100 ms        ~7–11 ms          ≈9–14×
+  ``list_unread`` 100 (10k)     300 ms        ~8–11 ms          ≈27–37×
+  ============================  ============  ================  ===========
 
   GitHub Actions Linux runners are typically 1–3× slower than this
   laptop on single-thread workloads with comparable storage. The
-  ``acknowledge`` row retains 50×+ headroom — CI passes trivially.
-  Do NOT relax the absolute threshold — it is a user-facing promise in
-  Vision §9.4.
+  ``acknowledge`` row retains 50×+ headroom; the two ``list_unread`` rows
+  retain multiple-× headroom post full-sort elimination (they are the
+  canary if a future change re-pessimises the scan path). Do NOT relax
+  the absolute thresholds — they are user-facing promises in Vision §9.4.
 """
 from __future__ import annotations
 
@@ -201,6 +220,125 @@ def bench_channel_1k(bench_channel: Channel) -> tuple[Channel, list[str]]:
         ),
     )
     return bench_channel, stems
+
+
+@pytest.fixture
+def bench_channel_10k(bench_channel: Channel) -> Channel:
+    """Channel pre-populated with 10 000 PEER message files (no fsync).
+
+    Deliberately leaves read-state ABSENT (no ``.read/claude-a.json``) so
+    the per-agent ``high_water_mark`` resolves to the fresh-endpoint
+    sentinel ``""`` — every one of the 10 000 peer messages is therefore
+    UNREAD, and ``list_unread(limit=20)`` actually reads its 20-message
+    page (N1: a pre-advanced cursor would make ``list_unread`` read ZERO
+    and silently reduce the benchmark to a scan-only measurement, dropping
+    the 20 JSON parses §9.4 promises to cover). Per-test corpus; cost
+    ~1–3 s on a contemporary laptop.
+    """
+    base = datetime(2026, 5, 27, 14, 0, 0, 0, tzinfo=timezone.utc)
+    for i in range(10_000):
+        stem = make_message_filename(
+            base + timedelta(microseconds=i)
+        ).removesuffix(".json")
+        write_message(
+            bench_channel.path,
+            _make_bench_msg(body=f"c{i}", msg_id=stem),
+        )
+    return bench_channel
+
+
+def test_check_messages_default_limit_p95_under_100ms(
+    bench_channel_10k: Channel,
+) -> None:
+    """Vision §9.4: ``Channel.list_unread(limit=20)`` P95 < 100 ms on 10k.
+
+    This is the real ``check_messages`` path (7c → ``list_unread``). It
+    replaces the retired protocol-layer ``list_messages()[-20:]`` stand-in:
+    the honest gate is the tool callers actually hit. Post the full-sort
+    elimination the cost is O(N) scan + O(N) cursor filter + O(M) heapify +
+    O((filled+skipped)·log M) — no O(N·log N) sort — so the 100 ms §9.4
+    budget passes with comfortable headroom even on ~2× GitHub runners.
+
+    N1 — the in-bench ``assert len == 20 and has_more`` locks in that 20
+    messages are truly read (fresh cursor). Without it a mis-seeded cursor
+    would silently measure scan-only and the budget would be meaningless.
+    """
+    channel = bench_channel_10k
+    start = time.monotonic()
+
+    def run_one() -> "object":
+        return channel.list_unread(self_instance_id="lb-bench", limit=20)
+
+    # N1 — prove the workload actually reads its full 20-message page
+    # before timing (guards against a scan-only degenerate benchmark).
+    result = run_one()
+    assert len(result.messages) == 20 and result.has_more, (
+        "list_unread(limit=20) must read a full 20-message page with "
+        f"has_more on the 10k fresh-cursor corpus; got "
+        f"{len(result.messages)} messages, has_more={result.has_more}"
+    )
+
+    for _ in range(_BENCH_WARMUP):
+        run_one()
+
+    samples_ms: list[float] = []
+    for _ in range(_BENCH_RUNS):
+        t0 = time.perf_counter_ns()
+        run_one()
+        t1 = time.perf_counter_ns()
+        samples_ms.append((t1 - t0) / 1_000_000.0)
+
+    _pad_warmup_until_floor(run_one, start_wall=start)
+
+    p95_ms = _p95(samples_ms)
+    assert p95_ms < 100.0, (
+        f"check_messages (list_unread limit=20) P95 = {p95_ms:.3f} ms "
+        f"exceeds 100 ms budget (Vision §9.4). Samples (ms): "
+        f"{sorted(samples_ms)}"
+    )
+
+
+def test_check_messages_max_limit_p95_under_300ms(
+    bench_channel_10k: Channel,
+) -> None:
+    """Vision §9.4: ``Channel.list_unread(limit=100)`` P95 < 300 ms on 10k.
+
+    The ``limit=100`` sibling of the 100 ms row above — same real
+    ``check_messages`` path, same fresh-cursor 10k corpus, larger page.
+    Passes with headroom post full-sort elimination.
+    """
+    channel = bench_channel_10k
+    start = time.monotonic()
+
+    def run_one() -> "object":
+        return channel.list_unread(self_instance_id="lb-bench", limit=100)
+
+    # N1 — prove the workload reads a full 100-message page before timing.
+    result = run_one()
+    assert len(result.messages) == 100 and result.has_more, (
+        "list_unread(limit=100) must read a full 100-message page with "
+        f"has_more on the 10k fresh-cursor corpus; got "
+        f"{len(result.messages)} messages, has_more={result.has_more}"
+    )
+
+    for _ in range(_BENCH_WARMUP):
+        run_one()
+
+    samples_ms: list[float] = []
+    for _ in range(_BENCH_RUNS):
+        t0 = time.perf_counter_ns()
+        run_one()
+        t1 = time.perf_counter_ns()
+        samples_ms.append((t1 - t0) / 1_000_000.0)
+
+    _pad_warmup_until_floor(run_one, start_wall=start)
+
+    p95_ms = _p95(samples_ms)
+    assert p95_ms < 300.0, (
+        f"check_messages (list_unread limit=100) P95 = {p95_ms:.3f} ms "
+        f"exceeds 300 ms budget (Vision §9.4). Samples (ms): "
+        f"{sorted(samples_ms)}"
+    )
 
 
 def test_acknowledge_p95_under_50ms(

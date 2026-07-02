@@ -1520,6 +1520,22 @@ class TestListUnread:
         result = ch.list_unread(self_instance_id="lb-X")
         assert [m.id for m in result.messages] == stems
 
+    def test_high_cursor_mostly_read_corpus_returns_tail_in_order(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        """DESIGN §3 — a mostly-read corpus with a high cursor. The
+        full-sort-elimination pushes the cursor filter BEFORE the lazy
+        heap, so the already-read entries are never popped; the surviving
+        unread tail must still come back oldest-first, exactly as before.
+        """
+        ch = _make_channel(tmp_letterbox_home, name="ch01", sender="claude-a")
+        stems = _populate_peer_msgs(ch, peer_sender="claude-b", count=200)
+        # Acknowledge the first 195; only the last 5 remain unread.
+        write_read_state(ch, _make_state(sender="claude-a", hwm=stems[194]))
+        result = ch.list_unread(self_instance_id="lb-X", limit=20)
+        assert [m.id for m in result.messages] == stems[195:]
+        assert result.has_more is False
+
     # --- since_id override (K3) -------------------------------------------
 
     def test_since_id_overrides_hwm_lower(
@@ -1944,6 +1960,41 @@ class TestLatestUnread:
         result = ch.latest_unread(self_instance_id="lb-X")
         assert result is not None
         assert result.id == stems[-1]
+
+    def test_peek_only_agent_many_trailing_own_writes(
+        self, tmp_letterbox_home: Path
+    ) -> None:
+        """Fable F2 — a peek-only agent (never advances the marker) keeps
+        writing, so the corpus tail is a long run of its OWN writes with
+        the newest unread peer buried beneath. The lazy descending walk
+        pops through the trailing own-writes at O(log N) each and returns
+        the peer — no fallback re-scan, no WINDOW. Pre-elimination this was
+        the degenerate case; here it is handled directly.
+        """
+        ch = _make_channel(tmp_letterbox_home, name="ch01", sender="claude-a")
+        base = datetime(2026, 5, 27, 14, 0, 0, 0, tzinfo=timezone.utc)
+        # One older peer message.
+        peer_stems = _populate_peer_msgs(
+            ch,
+            peer_sender="claude-b",
+            peer_instance="lb-peer",
+            count=1,
+            base=base,
+            start_offset_us=0,
+        )
+        # 50 NEWER own writes on top (same instance → own-write half).
+        _populate_peer_msgs(
+            ch,
+            peer_sender="claude-a",
+            peer_instance="lb-X",
+            count=50,
+            base=base,
+            start_offset_us=100,
+        )
+        result = ch.latest_unread(self_instance_id="lb-X")
+        assert result is not None
+        assert result.id == peer_stems[0]
+        assert result.sender == "claude-b"
 
     def test_skips_own_write_by_sender_half(
         self, tmp_letterbox_home: Path

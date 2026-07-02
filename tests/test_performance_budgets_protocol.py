@@ -1,9 +1,17 @@
 """Vision §9.4 protocol-layer performance budgets — block IMPLEMENTATION DONE per §13.7.
 
-The four budgets asserted here cover every protocol-layer row in
+The two budgets asserted here cover the two ``write_message`` rows in
 Vision §9.4. Per Cross-Cutting §13.7 these tests are gates on
 ``[IMPLEMENTATION DONE]`` for Phase 2d; CI failures here are real
 regressions, not flakes (no retry).
+
+The two ``check_messages`` rows that once lived here (a protocol-layer
+``list_messages()[-20:]`` + ``read_message`` stand-in) MOVED to
+``tests/test_performance_budgets_channel.py`` when the full-corpus sort in
+``list_messages`` was eliminated (DECISIONS.md — shared scan primitive +
+lazy heap iterators). They now drive the real ``Channel.list_unread`` tool
+path, which is the honest §9.4 gate. This file's remaining rows do not
+depend on ``list_messages`` at all.
 
 Calibration block (per PLANNING_NOTES "show your work"):
 
@@ -11,12 +19,10 @@ Calibration block (per PLANNING_NOTES "show your work"):
 * **P95 index:** ``ceil(0.95 * N) - 1 = 28`` (0-indexed) — the 29th of 30
   sorted samples (second-worst). The integer-arithmetic ``_p95`` helper
   below is stdlib-only (no numpy).
-* **Runtime floor:** 5 s per test (PLANNING_NOTES anti-flake floor).
-  The two ``check_messages``-equivalent tests exceed 5 s naturally from
-  the 10 000-message corpus build (~1-2 s) + measured iterations. The
-  two ``write_message`` tests pad via additional warmup (untimed) until
-  the floor is met — kept separate from the 30 timed samples so the
-  P95 estimator math stays the calibration discipline.
+* **Runtime floor:** 5 s per test (PLANNING_NOTES anti-flake floor). Both
+  ``write_message`` tests pad via additional warmup (untimed) until the
+  floor is met — kept separate from the 30 timed samples so the P95
+  estimator math stays the calibration discipline.
 * **Hardware envelope (Phase 2d author's laptop, 2026-05-27, Linux
   6.12.85, Python 3.13.5, ext4-backed ``/tmp``):**
 
@@ -25,26 +31,13 @@ Calibration block (per PLANNING_NOTES "show your work"):
   ===========================  ============  ==================  ===========
   ``write_message`` no-fsync   50 ms         0.024–0.051 ms      ≈1000–2000×
   ``write_message`` reject     10 ms         ~0.001 ms           ≈13000×
-  ``check_messages`` 20        100 ms        28–42 ms (median 32)  ≈2–4×
-  ``check_messages`` 100       300 ms        29–36 ms (median 31)  ≈8–10×
   ===========================  ============  ==================  ===========
 
-  The ``check_messages 20`` P95 is dominated by ``list_messages``
-  scanning + sorting the full 10 000-entry corpus, not by the 20
-  ``read_message`` calls — that's why the 100-message variant is only
-  slightly slower than the 20-message variant. The 2–4× headroom on
-  this one row is the tightest in 2d; below ~2× the budget would need
-  the bisection-trim optimisation deferred from 2c §14 (currently the
-  full directory is enumerated even for ``limit=20``). Until that
-  optimisation lands the laptop number sits comfortably under budget.
-
 * **GitHub Actions Linux runners** are typically 1–3× slower than this
-  laptop on single-thread workloads with comparable storage. The two
+  laptop on single-thread workloads with comparable storage. Both
   ``write_message`` rows retain 1000×+ headroom — CI passes trivially.
-  The two ``check_messages`` rows retain 2–10× headroom — CI passes
-  with comfort but is the canary if a future change pessimises
-  ``list_messages``. Do NOT relax the absolute thresholds — they are
-  user-facing promises in Vision §9.4.
+  Do NOT relax the absolute thresholds — they are user-facing promises in
+  Vision §9.4.
 """
 from __future__ import annotations
 
@@ -58,10 +51,8 @@ from letterbox.protocol import (
     MAX_BODY_BYTES,
     Message,
     MessageTooLarge,
-    list_messages,
     make_message_filename,
     new_message,
-    read_message,
     write_message,
 )
 
@@ -150,24 +141,6 @@ def bench_channel_1k(bench_channel_dir: Path) -> Path:
     """
     base = datetime(2026, 5, 27, 14, 0, 0, 0, tzinfo=timezone.utc)
     for i in range(1000):
-        msg_id = make_message_filename(
-            base + timedelta(microseconds=i)
-        ).removesuffix(".json")
-        write_message(bench_channel_dir, _make_bench_msg(body=f"c{i}", msg_id=msg_id))
-    return bench_channel_dir
-
-
-@pytest.fixture
-def bench_channel_10k(bench_channel_dir: Path) -> Path:
-    """Channel pre-populated with 10 000 messages (no fsync).
-
-    G7 — per-test corpus; cost ~1-3 s on a contemporary laptop. Module-
-    scope rejected per the plan (bleeding state across tests surprises
-    the reader). If observed runtime grows past ~60 s for the file,
-    revisit per the Implementer's Latitude note in p2d §14.
-    """
-    base = datetime(2026, 5, 27, 14, 0, 0, 0, tzinfo=timezone.utc)
-    for i in range(10_000):
         msg_id = make_message_filename(
             base + timedelta(microseconds=i)
         ).removesuffix(".json")
@@ -268,77 +241,10 @@ def test_write_message_rejection_p95_under_10ms(bench_channel_dir: Path) -> None
     )
 
 
-@pytest.mark.skip(
-    reason=(
-        "TEMPORARY (do NOT leave skipped): GitHub Actions runners are ~2x "
-        "slower than the calibration laptop, so this row's P95 lands ~110-116 "
-        "ms against its 100 ms §9.4 budget with no headroom. The 100 ms "
-        "threshold is a user-facing promise and must NOT be relaxed. The fix "
-        "is the newest-N fast path for list_messages (avoids the full O(N log "
-        "N) sort of the whole corpus for a limit=20 read) — this skip is "
-        "REMOVED and the test re-enabled (unchanged threshold) as the final "
-        "step of that change. Tracked in ROADMAP.md."
-    )
-)
-def test_check_messages_default_limit_p95_under_100ms(
-    bench_channel_10k: Path,
-) -> None:
-    """Vision §9.4: ``list_messages`` + ``read_message`` × 20 P95 < 100 ms.
-
-    The ``check_messages`` MCP tool (Phase 7c) wraps this protocol-layer
-    primitive pair; the budget belongs to the underlying primitives.
-    """
-    start = time.monotonic()
-
-    def run_one() -> None:
-        paths = list_messages(bench_channel_10k)
-        for p in paths[-20:]:
-            read_message(p)
-
-    for _ in range(_BENCH_WARMUP):
-        run_one()
-
-    samples_ms: list[float] = []
-    for _ in range(_BENCH_RUNS):
-        t0 = time.perf_counter_ns()
-        run_one()
-        t1 = time.perf_counter_ns()
-        samples_ms.append((t1 - t0) / 1_000_000.0)
-
-    _pad_warmup_until_floor(run_one, start_wall=start)
-
-    p95_ms = _p95(samples_ms)
-    assert p95_ms < 100.0, (
-        f"check_messages (limit=20) P95 = {p95_ms:.3f} ms exceeds 100 ms "
-        f"budget (Vision §9.4). Samples (ms): {sorted(samples_ms)}"
-    )
-
-
-def test_check_messages_max_limit_p95_under_300ms(
-    bench_channel_10k: Path,
-) -> None:
-    """Vision §9.4: ``list_messages`` + ``read_message`` × 100 P95 < 300 ms."""
-    start = time.monotonic()
-
-    def run_one() -> None:
-        paths = list_messages(bench_channel_10k)
-        for p in paths[-100:]:
-            read_message(p)
-
-    for _ in range(_BENCH_WARMUP):
-        run_one()
-
-    samples_ms: list[float] = []
-    for _ in range(_BENCH_RUNS):
-        t0 = time.perf_counter_ns()
-        run_one()
-        t1 = time.perf_counter_ns()
-        samples_ms.append((t1 - t0) / 1_000_000.0)
-
-    _pad_warmup_until_floor(run_one, start_wall=start)
-
-    p95_ms = _p95(samples_ms)
-    assert p95_ms < 300.0, (
-        f"check_messages (limit=100) P95 = {p95_ms:.3f} ms exceeds 300 ms "
-        f"budget (Vision §9.4). Samples (ms): {sorted(samples_ms)}"
-    )
+# NOTE: The two ``check_messages`` budget rows (``list_unread`` at
+# ``limit=20`` @ 100 ms and ``limit=100`` @ 300 ms) moved to
+# ``tests/test_performance_budgets_channel.py`` when the full-corpus sort
+# in ``list_messages`` was eliminated (DECISIONS.md). They now drive the
+# real ``Channel.list_unread`` tool path rather than a protocol-layer
+# ``list_messages()[-20:]`` stand-in — the honest §9.4 gate is the caller
+# agents actually hit. This file retains the two ``write_message`` rows.
