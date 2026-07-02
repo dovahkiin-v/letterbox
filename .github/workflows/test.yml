@@ -104,5 +104,5 @@ jobs:
 
       - name: Assert wheel + sdist were produced
         run: |
-          ls dist/letterbox-1.0.0-py3-none-any.whl
-          ls dist/letterbox-1.0.0.tar.gz
+          ls dist/letterbox-*-py3-none-any.whl
+          ls dist/letterbox-*.tar.gz
