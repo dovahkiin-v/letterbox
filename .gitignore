@@ -110,3 +110,6 @@ FRAMEWORK.md
 decisions.md
 DECISIONS.md
 Decisions.md
+
+# Local build handoffs / design docs — not for the public repo
+.planning/
