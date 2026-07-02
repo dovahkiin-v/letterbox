@@ -79,7 +79,12 @@ class TestDefaults:
         assert config.channels == DEFAULT_CHANNELS == []
 
     def test_default_harnesses_have_expected_names(self) -> None:
-        assert set(DEFAULT_HARNESSES.keys()) == {"claude", "gemini", "antigravity"}
+        assert set(DEFAULT_HARNESSES.keys()) == {
+            "claude",
+            "gemini",
+            "antigravity",
+            "vibe",
+        }
 
     def test_antigravity_command_is_agy_not_antigravity(self) -> None:
         # Easy place to drift — the harness *name* and the *command* differ.
@@ -478,6 +483,7 @@ class TestCustomHarness:
             "claude",
             "gemini",
             "antigravity",
+            "vibe",
             "codex",
         }
         codex = config.harnesses["codex"]
