@@ -20,6 +20,9 @@ from typing import Any
 from letterbox.protocol import (
     Message,
     ParseError,
+    _iter_names_ascending,
+    _iter_names_descending,
+    _scan_valid_names,
     is_valid_channel_name,
     list_messages,
     read_message,
@@ -371,15 +374,21 @@ class Channel:
         else:
             bound = read_state(self, self.sender_label).high_water_mark
 
-        paths = list_messages(self.path, since=None)
+        # Push the cursor filter BEFORE the lazy heap so we never pop
+        # through thousands of already-read entries (the O(N log N)→
+        # O(N + k log N) win for a mostly-read corpus). ``_scan_valid_names``
+        # owns the enumeration invariants (scandir, is_dir skip, ADR-028
+        # warn-once, ``.tmp`` exclusion); the comprehension applies the same
+        # G1 stem cursor the old in-loop ``path.stem <= bound`` continue did,
+        # so pre-filtered entries are never processed either way.
+        names = _scan_valid_names(self.path)
+        unread = [n for n in names if n.removesuffix(".json") > bound]
         messages: list[Message] = []
         parse_errors: list[ParseError] = []
         has_more = False
 
-        for path in paths:
-            # G1 — stem comparison (no ``.json``), matches 3b's stored hwm shape.
-            if path.stem <= bound:
-                continue
+        for name in _iter_names_ascending(unread):
+            path = self.path / name
             try:
                 result = read_message(path)
             except FileNotFoundError:
@@ -473,12 +482,16 @@ class Channel:
                 ``^[a-z0-9][a-z0-9_-]*$``.
         """
         bound = read_state(self, self.sender_label).high_water_mark
-        # G2 — reverse scan with early break is correct because filenames
-        # sort chronologically (ADR-027): the first stem <= bound means
-        # every remaining (older) path is also acknowledged.
-        for path in reversed(list_messages(self.path, since=None)):
-            if path.stem <= bound:
-                break
+        # G2 — newest-first lazy walk with early stop is correct because
+        # filenames sort chronologically (ADR-027): the first stem <= bound
+        # means every remaining (older) name is also acknowledged, so we
+        # stop. ``_iter_names_descending`` pops names lazily (O(log N) each),
+        # so a peek that stops at the first unread — even past many trailing
+        # own-writes (Fable F2) — never pays the full-corpus sort.
+        for name in _iter_names_descending(_scan_valid_names(self.path)):
+            if name.removesuffix(".json") <= bound:
+                return None
+            path = self.path / name
             try:
                 result = read_message(path)
             except FileNotFoundError:

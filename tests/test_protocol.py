@@ -1715,3 +1715,160 @@ class TestReapOrphanTmp:
         # __all__ carries the new symbol so downstream wiring (Phase 8a
         # launcher) can ``from letterbox.protocol import reap_orphan_tmp``.
         assert "reap_orphan_tmp" in protocol.__all__
+
+
+# ──────────────────────────────────────────────────────────────
+# TestScanValidNames + lazy heap iterators (full-sort elimination)
+# ──────────────────────────────────────────────────────────────
+
+
+class TestScanValidNames:
+    """The shared scan primitive underneath ``list_messages`` and the
+    channel-layer hot readers — DESIGN §1a / §7 / DECISIONS.md."""
+
+    def test_returns_bare_names_unsorted_set(self, channel_dir: Path) -> None:
+        # Same valid corpus as ``list_messages`` sees, but as bare
+        # ``entry.name`` strings and in arbitrary (scan) order. The set of
+        # names must equal the set ``list_messages`` returns.
+        base = datetime(2026, 5, 27, 14, 30, 15, 0, tzinfo=timezone.utc)
+        expected: set[str] = set()
+        for i in range(20):
+            msg_id = make_message_filename(
+                base + timedelta(microseconds=i)
+            ).removesuffix(".json")
+            p = write_message(channel_dir, _make_real(id=msg_id))
+            expected.add(p.name)
+
+        names = protocol._scan_valid_names(channel_dir)
+        assert isinstance(names, list)
+        assert all(isinstance(n, str) for n in names)
+        assert set(names) == expected
+
+    def test_list_messages_is_sorted_scan(self, channel_dir: Path) -> None:
+        # The golden equivalence that guarantees byte-identical output for
+        # all 8 existing callers: ``list_messages`` == the scan primitive
+        # sorted and lifted back to ``Path`` objects.
+        base = datetime(2026, 5, 27, 14, 30, 15, 0, tzinfo=timezone.utc)
+        for i in range(20):
+            msg_id = make_message_filename(
+                base + timedelta(microseconds=i)
+            ).removesuffix(".json")
+            write_message(channel_dir, _make_real(id=msg_id))
+
+        listed = list_messages(channel_dir)
+        rebuilt = [
+            channel_dir / n
+            for n in sorted(protocol._scan_valid_names(channel_dir))
+        ]
+        assert listed == rebuilt
+
+    def test_skips_dirs_tmp_and_bad_names_warn_once(
+        self,
+        channel_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+        reset_warn_dedupe: None,
+    ) -> None:
+        # Validation is a side effect of *scanning*: subdirs are skipped
+        # silently (is_dir BEFORE validation, N4 — never reach the WARN
+        # path), a ``.tmp`` is excluded from RESULTS (\.json$ anchor) but,
+        # being a non-dir file that fails the validator, still warns once
+        # like any other malformed name (unchanged from ``list_messages``);
+        # a novel bad name warns once too.
+        (channel_dir / "subdir").mkdir()
+        (channel_dir / "cold").mkdir()  # N4 — no spurious ADR-028 warn
+        tmp_name = f"{_valid_id()}.json.tmp"
+        (channel_dir / tmp_name).write_bytes(b"{}")
+        bad_name = f"msg-bad-{uuid.uuid4().hex}.json"
+        (channel_dir / bad_name).write_bytes(b"{}")
+        good = write_message(channel_dir, _make_real())
+
+        with caplog.at_level(logging.WARNING, logger="letterbox.protocol"):
+            names = protocol._scan_valid_names(channel_dir)
+
+        # Only the valid message survives; subdirs and .tmp are excluded.
+        assert names == [good.name]
+        assert tmp_name not in names
+        warned_names = {
+            r.args[0]
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+        }
+        # The two malformed FILES warn once each; the subdirs never do.
+        assert warned_names == {bad_name, tmp_name}
+        assert not any(
+            "subdir" in r.getMessage() or "cold" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_since_strictly_greater(self, channel_dir: Path) -> None:
+        # The cursor filter is full-name strict-greater, identical to
+        # ``list_messages``' contract (§3.2 / G8).
+        base = datetime(2026, 5, 27, 14, 30, 15, 0, tzinfo=timezone.utc)
+        names_written: list[str] = []
+        for i in range(5):
+            msg_id = make_message_filename(
+                base + timedelta(microseconds=i)
+            ).removesuffix(".json")
+            names_written.append(write_message(channel_dir, _make_real(id=msg_id)).name)
+        names_written.sort()
+
+        result = sorted(
+            protocol._scan_valid_names(channel_dir, since=names_written[2])
+        )
+        assert result == names_written[3:]
+
+    def test_missing_directory_raises(self, tmp_letterbox_home: Path) -> None:
+        missing = tmp_letterbox_home / "channels" / "nope"
+        with pytest.raises(FileNotFoundError):
+            protocol._scan_valid_names(missing)
+
+
+class TestLazyNameIterators:
+    """``_iter_names_ascending`` / ``_iter_names_descending`` / ``_Rev`` —
+    DESIGN §1c. Lazy heap selection, O(N + k·log N) for a k-pop reader."""
+
+    def _sample_names(self) -> list[str]:
+        base = datetime(2026, 5, 27, 14, 30, 15, 0, tzinfo=timezone.utc)
+        # Deliberately construct in shuffled order so we prove the heap
+        # orders them, not the input.
+        order = [4, 0, 9, 2, 7, 1, 8, 3, 6, 5]
+        return [
+            make_message_filename(base + timedelta(microseconds=i))
+            for i in order
+        ]
+
+    def test_ascending_equals_sorted(self) -> None:
+        names = self._sample_names()
+        assert list(protocol._iter_names_ascending(names)) == sorted(names)
+
+    def test_descending_equals_reverse_sorted(self) -> None:
+        names = self._sample_names()
+        assert list(protocol._iter_names_descending(names)) == sorted(
+            names, reverse=True
+        )
+
+    def test_does_not_mutate_input(self) -> None:
+        names = self._sample_names()
+        snapshot = list(names)
+        list(protocol._iter_names_ascending(names))
+        list(protocol._iter_names_descending(names))
+        assert names == snapshot
+
+    def test_lazy_partial_consumption_descending(self) -> None:
+        # A reader that stops after k pops gets the k largest (newest) in
+        # order — the ``latest_unread`` stop-early property.
+        names = self._sample_names()
+        it = protocol._iter_names_descending(names)
+        first_three = [next(it) for _ in range(3)]
+        assert first_three == sorted(names, reverse=True)[:3]
+
+    def test_empty(self) -> None:
+        assert list(protocol._iter_names_ascending([])) == []
+        assert list(protocol._iter_names_descending([])) == []
+
+    def test_rev_inverts_ordering(self) -> None:
+        lo = protocol._Rev("a")
+        hi = protocol._Rev("b")
+        # ``_Rev`` inverts ``<`` so the min-heap surfaces the max name.
+        assert hi < lo
+        assert not lo < hi
