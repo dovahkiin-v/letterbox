@@ -1,4 +1,9 @@
 # Letterbox
+<!-- mcp-name: io.github.dovahkiin-v/letterbox -->
+<!-- ^ MCP Registry ownership proof (ADR-071). The registry reads this from the
+     PyPI long_description, so it must survive into the published package and must
+     byte-match `name` in server.json. tests/test_registry_meta.py locks the pair. -->
+
 
 ![Status: Reference Implementation](https://img.shields.io/badge/status-reference%20implementation-blue) ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-green) ![POSIX only](https://img.shields.io/badge/platform-POSIX-lightgrey)
 

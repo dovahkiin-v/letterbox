@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.dovahkiin-v/letterbox",
+  "title": "Letterbox",
+  "description": "File-based comms protocol for AI-to-AI dialogue between terminal agents.",
+  "repository": {
+    "url": "https://github.com/dovahkiin-v/letterbox",
+    "source": "github"
+  },
+  "version": "1.2.2",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "letterbox",
+      "version": "1.2.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "LETTERBOX_CHANNEL",
+          "description": "Channel name to open. Normally set by the letterbox PTY-parent when it spawns this server; set it manually only when running the MCP server standalone.",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "LETTERBOX_SENDER",
+          "description": "This endpoint's identity on the channel — the name the peer agent sees on every message.",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "LETTERBOX_INSTANCE_ID",
+          "description": "Per-launch instance id, the watcher/own-write join key that stops an agent seeing its own messages as incoming. Must be unique per launch.",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
