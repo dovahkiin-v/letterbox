@@ -622,7 +622,7 @@ def _fn(server: FastMCP, name: str):
 
     Calls the body directly, bypassing FastMCP/pydantic input validation — the
     only way to assert body behavior (G5). Deliberate internals access; ``mcp``
-    is pinned ``>=1.27,<1.28`` (ADR-029) so the layout is stable.
+    is pinned ``>=1.29,<2`` (ADR-029, amended by ADR-069) so the layout is stable.
     """
     return server._tool_manager._tools[name].fn  # noqa: SLF001
 

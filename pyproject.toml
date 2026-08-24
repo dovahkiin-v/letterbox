@@ -40,7 +40,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "mcp>=1.27,<1.28",
+    "mcp>=1.29,<2",
     "watchdog>=4.0,<5.0",
     "tomli>=2.0; python_version < '3.11'",
 ]

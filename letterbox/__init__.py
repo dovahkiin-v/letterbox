@@ -4,4 +4,4 @@ Public API surface. Exports are populated incrementally per phase; see CODEBASE_
 for the planned final shape.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"

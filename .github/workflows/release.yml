@@ -1,0 +1,84 @@
+name: release
+
+# Publishes to PyPI via Trusted Publishing (OIDC) — no API token is stored in
+# this repo, in a secret, or on any developer machine. PyPI is configured with a
+# pending/active publisher naming this repo, THIS workflow filename, and the
+# `pypi` environment; all four must match or the upload is rejected. Renaming
+# this file breaks publishing until the publisher on PyPI is updated to match.
+#
+# Trigger is a `v*` tag, and `check` refuses to publish unless the tag matches
+# letterbox.__version__ exactly. That attribute stays the single source of truth
+# (pyproject reads it dynamically, and the CLI's update check compares against
+# it on `main`) — the tag is an assertion about it, never a second home for it.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+jobs:
+  check:
+    name: tag matches letterbox.__version__
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Read the attribute textually rather than importing the package: an
+      # import would pull the runtime dependencies in just to read a string.
+      - name: Compare tag to __version__
+        run: |
+          version="$(grep -Po '^__version__\s*=\s*"\K[^"]+' letterbox/__init__.py)"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "__version__=$version  tag=$tag"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::Tag v$tag does not match letterbox.__version__ ($version). Bump the attribute and re-tag."
+            exit 1
+          fi
+
+  build:
+    name: build wheel + sdist
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install build frontend
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build wheel + sdist
+        run: python -m build
+
+      # twine check catches a README that PyPI would refuse to render — a
+      # failure PyPI reports only AFTER the version is uploaded and burned.
+      - name: Validate distribution metadata
+        run: python -m twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/letterbox
+    permissions:
+      id-token: write   # the OIDC token IS the credential; nothing else is needed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@v1.14.2
