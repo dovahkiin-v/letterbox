@@ -4,6 +4,17 @@ Architectural Decision Records (ADRs). **Newest at top**, oldest at bottom. ADR 
 
 ---
 
+## ADR-070 — Public maintainer contact is `vinga@skyforge.sh`; the PyPI account, repo, and `[project.urls]` stay personal
+
+**Date:** 2026-08-25
+**Context:** Publishing to PyPI (ADR-069) forced a question the git-only distribution never did: which email a stranger sees on the package page. Two distinct addresses are involved and they had been conflated. The **PyPI account email** governs login, password reset, 2FA recovery and security notices, and is not public by default. The **`[project].authors` email** is the public maintainer contact rendered on the project page. `CLAUDE.md` and ADR-048/K2 record that letterbox is positioned as a personal artifact — repo on `dovahkiin-v`, never `skyforge-sh` — so a Skyforge-domain contact is in tension with that framing, and this ADR exists because that tension was raised and then deliberately accepted rather than settled by default.
+**Decision:** Split them. `[project].authors` becomes `vinga@skyforge.sh`; the PyPI **account** email, the GitHub repo owner, and every `[project.urls]` entry stay personal (`vingaluksaite@gmail.com` / `dovahkiin-v`). The K2 guard (`test_project_urls_point_at_personal_repo`) is left **unwidened**: it asserts "never skyforge" over `[project.urls]` values only, which remains true and enforced. A comment above the `authors` line points at this ADR so a future reader who notices the apparent K2 violation finds the reasoning instead of "fixing" it.
+**Rationale:** Keeping account recovery on gmail avoids making a custom domain a single point of failure on the identity that now publishes releases — if `skyforge.sh` lapses or its MX/SPF silently misdelivers (a failure this stack has hit before), the reset path dies exactly when it is needed. That risk is real for recovery and irrelevant for a display address, which is why the split is the right shape: each email is chosen against the failure mode that actually applies to it. On the public half, the domain gives the package a durable contact that survives a personal-inbox change and reads as a maintained address. The cost is honest and recorded rather than hidden — this *does* soften the strictly-personal framing ADR-048 established, and a reader may infer a Skyforge product where the positioning says personal artifact. Judged acceptable because the load-bearing signals of that positioning (repo owner, project URLs, the essay framing, the frozen-artifact stance of ADR-001) are all untouched; a contact address is the weakest of them. Not widening K2 is deliberate: an invariant that quietly grows to cover new ground stops meaning what its name says, and a test edited in the same commit as the thing it guards has stopped being a guard.
+**Supersedes:** None. Narrows the *scope* of ADR-048/K2's "personal, never skyforge" from all publishable metadata to the repo and `[project.urls]` specifically — the invariant is unchanged in code and now explicit about its boundary. Follows ADR-069 (the release that made the public contact visible for the first time). Does not touch ADR-001's frozen-artifact stance: a contactable maintainer address is not a maintenance promise.
+
+---
+
+
 ## ADR-069 — Publish to PyPI via Trusted Publishing on a `v*` tag, and raise the `mcp` floor to `>=1.29,<2` (amends ADR-029)
 
 **Date:** 2026-08-25

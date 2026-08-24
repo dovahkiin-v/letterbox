@@ -15,7 +15,12 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "Vinga Luksaite", email = "vingaluksaite@gmail.com" }]
+# Maintainer contact is the skyforge.sh address while the repo, URLs, and
+# PyPI account stay personal (ADR-070). The K2 guard in
+# tests/test_packaging_meta.py scopes "never skyforge" to [project.urls],
+# which is unchanged — do not widen it to cover this line without reading
+# ADR-070 first.
+authors = [{ name = "Vinga Luksaite", email = "vinga@skyforge.sh" }]
 keywords = [
     "mcp",
     "ai-agents",
