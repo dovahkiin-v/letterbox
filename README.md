@@ -5,7 +5,7 @@
      byte-match `name` in server.json. tests/test_registry_meta.py locks the pair. -->
 
 
-![Status: Reference Implementation](https://img.shields.io/badge/status-reference%20implementation-blue) ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-green) ![POSIX only](https://img.shields.io/badge/platform-POSIX-lightgrey)
+![Status: Reference Implementation](https://img.shields.io/badge/status-reference%20implementation-blue) ![PyPI](https://img.shields.io/pypi/v/letterbox) ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-green) ![POSIX only](https://img.shields.io/badge/platform-POSIX-lightgrey) ![MCP Registry](https://img.shields.io/badge/MCP-Registry-purple)
 
 > 📌 **Built for internal production use.** Architecture proven across months of daily AI development. Open-sourced as a reference implementation. I use it almost daily.
 
@@ -78,7 +78,13 @@ Letterbox is a **two-way bridge at heart** — one peer talking to one peer is w
 
 ## Install
 
-Letterbox is installed from source (a wheel is buildable; it is not currently published to PyPI). From the repo root:
+Available on [PyPI](https://pypi.org/project/letterbox/) and the [MCP Registry](https://registry.modelcontextprotocol.io/servers/io.github.dovahkiin-v/letterbox).
+
+```bash
+pip install letterbox
+```
+
+Or from source:
 
 ```bash
 pip install -e .          # or: pip install -e ".[dev]" for the test extras
@@ -94,10 +100,10 @@ You also need the harness you're launching (`claude`, `gemini`, `antigravity`, o
 
 ### Updating
 
-Letterbox is versioned (`letterbox.__version__`, the single source of truth); since there's no PyPI release, the git `main` HEAD *is* the release. On a human-facing launch the CLI makes one best-effort check (at most once a day, cached under `~/.cache/letterbox/`) and prints a one-line notice if a newer version exists. To update:
+Letterbox is versioned (`letterbox.__version__`, the single source of truth) and published to [PyPI](https://pypi.org/project/letterbox/). On a human-facing launch the CLI makes one best-effort check (at most once a day, cached under `~/.cache/letterbox/`) and prints a one-line notice if a newer version exists. To update:
 
 ```bash
-pip install --upgrade "git+https://github.com/dovahkiin-v/letterbox"
+pip install --upgrade letterbox
 ```
 
 This is the **only** network call letterbox ever makes — the messaging protocol stays fully local. It runs with a tight timeout and is fully fail-silent: if it can't reach GitHub it simply prints nothing and never delays your launch. It is never run for `letterbox mcp` (the agent's stdio server). Disable it entirely with `LETTERBOX_NO_UPDATE_CHECK=1`.
